@@ -1,0 +1,8 @@
+{
+  "appId": "com.xueni97.bazixuangu",
+  "appName": "八字选股",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false
+  }
+}
