@@ -32,6 +32,11 @@ export const BRANCH_ELEMENT = {
   申: "金", 酉: "金", 戌: "土", 亥: "水",
 };
 
+// 五行 → CSS 类名映射（全局统一样式类 element-wood / bg-wood 等）
+export const ELEMENT_CSS_MAP = {
+  木: "wood", 火: "fire", 土: "earth", 金: "metal", 水: "water",
+};
+
 // 地支藏干（本气、中气、余气）
 export const BRANCH_HIDDEN_STEMS = {
   子: ["癸"],

@@ -86,22 +86,10 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import dayjs from 'dayjs'
-import { BaziEngine, YuanhaiDecisionModel, STEMS, BRANCHES } from '../core'
+import { BaziEngine, YuanhaiDecisionModel, STEM_ELEMENT, BRANCH_ELEMENT, ELEMENT_CSS_MAP } from '../core'
 
 const analysis = ref(null)
 const pillars = ref(null)
-
-const ELEMENT_MAP = { '木': 'wood', '火': 'fire', '土': 'earth', '金': 'metal', '水': 'water' }
-const STEMS_ELEMENTS = {}
-STEMS.forEach((s, i) => {
-  const elems = ['木','木','火','火','土','土','金','金','水','水']
-  STEMS_ELEMENTS[s] = elems[i]
-})
-const BRANCHES_ELEMENTS = {}
-BRANCHES.forEach((b, i) => {
-  const elems = ['水','土','木','木','土','火','火','土','金','金','土','水']
-  BRANCHES_ELEMENTS[b] = elems[i]
-})
 
 const pillarList = computed(() => {
   if (!pillars.value) return []
@@ -111,8 +99,8 @@ const pillarList = computed(() => {
     label: labels[i],
     stem: p.stem,
     branch: p.branch,
-    stemElem: ELEMENT_MAP[STEMS_ELEMENTS[p.stem]],
-    branchElem: ELEMENT_MAP[BRANCHES_ELEMENTS[p.branch]],
+    stemElem: ELEMENT_CSS_MAP[STEM_ELEMENT[p.stem]],
+    branchElem: ELEMENT_CSS_MAP[BRANCH_ELEMENT[p.branch]],
   }))
 })
 

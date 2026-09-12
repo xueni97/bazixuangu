@@ -95,13 +95,8 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import dayjs from 'dayjs'
-import { BaziEngine, YuanhaiDecisionModel, STEMS, BRANCHES } from '../core'
+import { BaziEngine, YuanhaiDecisionModel, STEM_ELEMENT, BRANCH_ELEMENT, ELEMENT_CSS_MAP } from '../core'
 
-const STEMS_ELEMENTS = {}
-STEMS.forEach((s, i) => { STEMS_ELEMENTS[s] = ['木','木','火','火','土','土','金','金','水','水'][i] })
-const BRANCHES_ELEMENTS = {}
-BRANCHES.forEach((b, i) => { BRANCHES_ELEMENTS[b] = ['水','土','木','木','土','火','火','土','金','金','土','水'][i] })
-const ELEM_MAP = { '木': 'wood', '火': 'fire', '土': 'earth', '金': 'metal', '水': 'water' }
 const STRENGTH_PCT = { '旺': 100, '相': 75, '休': 50, '囚': 25, '死': 10 }
 
 const daily = ref(null)
@@ -116,8 +111,8 @@ function loadDaily(dt) {
   const ps = [pillars.year, pillars.month, pillars.day, pillars.hour]
   d.pillarList = ps.map((p, i) => ({
     label: labels[i], stem: p.stem, branch: p.branch,
-    stemElem: ELEM_MAP[STEMS_ELEMENTS[p.stem]],
-    branchElem: ELEM_MAP[BRANCHES_ELEMENTS[p.branch]],
+    stemElem: ELEMENT_CSS_MAP[STEM_ELEMENT[p.stem]],
+    branchElem: ELEMENT_CSS_MAP[BRANCH_ELEMENT[p.branch]],
   }))
   daily.value = d
 }

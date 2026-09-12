@@ -69,3 +69,19 @@
 ## 明确不做（YAGNI）
 
 - 不补历史 K 线（现有 2176 只保持）；不引 Electron/Tauri；不引重型图表库；不做用户系统/鉴权。
+
+## 变更记录
+
+### 2026-09-12 实施：数据源改为多源 fallback 链
+
+设计时假设 akshare 东财接口可用，实测发现东财 push2 主域在当前网络被远端重置
+（RemoteDisconnected）——这正是"数据一直拉不下来"的根因。经逐源连通性实测，改为
+直连 HTTP 的多源链（不再依赖 akshare 封装）：
+
+1. eastmoney-delay：push2delay.eastmoney.com（东财延时域，实测可用，全市场 5913 只含北交所）
+2. tencent：qt.gtimg.cn 批量行情（按 stock_names 代码表，含 bj 前缀，实测可用）
+3. sina：Market_Center.getHQNodeData 列表（含 920 段，实测可用）
+
+每源独立重试 2 次，失败自动切换下一源；成功源记入 sync_meta.last_source。
+实测结果：5913 只全市场落库（沪 2467 / 深 3091 / 北交所 355），抽查价格正确。
+另发现 push2delay 单页上限 100 条（非 600），分页逻辑已修正。
