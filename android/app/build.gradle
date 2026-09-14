@@ -16,10 +16,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    // 固定签名配置：每次 CI 构建用同一个密钥，保证 APK 可覆盖安装
+    signingConfigs {
+        release {
+            storeFile file('qinqilu-release.keystore')
+            storePassword 'qinqilu2026'
+            keyAlias 'qinqilu'
+            keyPassword 'qinqilu2026'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
         }
     }
 }
