@@ -1,10 +1,6 @@
 <template>
   <div class="scan-page">
-    <van-nav-bar title="股票扫描" left-arrow @click-left="$router.back()">
-      <template #right>
-        <van-icon name="setting-o" size="20" @click="openSettings" />
-      </template>
-    </van-nav-bar>
+    <van-nav-bar title="股票扫描" left-arrow @click-left="$router.back()" />
 
     <div class="scan-layout">
       <!-- 左栏：操作 + 概况 + 结果列表 -->
@@ -119,7 +115,7 @@
             <van-button v-if="maSyncNeeded" size="small" type="primary" @click="onSyncMa">
               立即更新均线数据
             </van-button>
-            <van-button size="small" plain @click="openSettings">检查后端设置</van-button>
+            <van-button size="small" plain @click="onSync">立即更新快照</van-button>
           </van-empty>
         </div>
 
@@ -289,24 +285,11 @@
         </div>
 
         <div class="side-card tips-card">
-          <div class="card-title">手机联用</div>
-          <p class="tip-text">手机与电脑连同一WiFi，点右上角设置填入电脑地址即可在手机上扫描全市场数据。</p>
+          <div class="card-title">数据独立</div>
+          <p class="tip-text">APP 启动时自动后台拉取全市场行情与均线数据，无需连接电脑。首次拉取约3~5分钟，之后每交易日增量更新。</p>
         </div>
       </div>
     </div>
-
-    <!-- 后端地址设置弹窗 -->
-    <van-popup v-model:show="showSettings" round position="bottom" style="padding: 20px">
-      <div class="settings-title">后端地址设置</div>
-      <van-field v-model="backendInput" label="地址" placeholder="http://192.168.x.x:5175/api" />
-      <p class="settings-tip">
-        默认使用本地服务（电脑浏览器）。手机APK连电脑时，填电脑局域网地址（电脑启动服务时会打印）。
-      </p>
-      <div style="margin-top: 12px; display: flex; gap: 8px">
-        <van-button block @click="showSettings = false">取消</van-button>
-        <van-button block type="primary" @click="saveSettings">保存</van-button>
-      </div>
-    </van-popup>
   </div>
 </template>
 
@@ -315,9 +298,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { showToast } from 'vant'
 import {
   scanStocks, searchStocks, getSectors, getSyncStatus, triggerSync, triggerMaSync,
-  getBackendBase, setBackendBase,
 } from '../api'
-import { StockElementAnalyzer, YuanhaiDecisionModel } from '../core'
 
 const keyword = ref('')
 const loading = ref(false)
@@ -394,13 +375,10 @@ const syncing = ref(false)
 const maSyncing = ref(false)
 let syncTimer = null
 
-const showSettings = ref(false)
-const backendInput = ref('')
-
 const syncStatusText = computed(() => {
   if (syncing.value) return '同步中...'
   if (syncState.value.todaySynced) return '今日快照已最新'
-  if (syncState.value.status === 'failed') return '上次同步失败'
+  if (syncState.value.spotStatus === 'failed') return '上次同步失败'
   return syncState.value.lastSuccessDate ? '待更新' : '未同步'
 })
 
@@ -415,29 +393,20 @@ async function refreshSyncStatus(silent = true) {
     const st = await getSyncStatus()
     const wasSyncing = syncing.value
     const wasMaSyncing = maSyncing.value
-    syncing.value = st.status === 'syncing'
-    maSyncing.value = st.ma_status === 'syncing'
-    syncState.value = {
-      ...st,
-      spotCount: st.spot_count,
-      maCount: st.ma_count,
-      maTradeDate: st.ma_trade_date,
-      maPhase: st.ma_phase,
-      maDone: st.ma_done,
-      maTotal: st.ma_total,
-      maLastError: st.ma_last_error,
-    }
+    syncing.value = st.spotStatus === 'syncing'
+    maSyncing.value = st.maStatus === 'syncing'
+    syncState.value = st
     // 快照同步从进行中变为结束 → 刷新分布图，并提示
     if (wasSyncing && !syncing.value) {
       loadSectors()
-      showToast(st.lastError ? '快照同步失败' : '快照同步完成')
+      showToast(st.spotLastError ? '快照同步失败' : '快照同步完成')
     }
     // 均线同步结束提示
     if (wasMaSyncing && !maSyncing.value) {
-      showToast(st.ma_last_error ? '均线同步失败' : '均线同步完成')
+      showToast(st.maLastError ? '均线同步失败' : '均线同步完成')
     }
   } catch {
-    if (!silent) showToast('无法获取同步状态：后端未启动')
+    if (!silent) showToast('无法获取同步状态')
   }
 }
 
@@ -457,34 +426,25 @@ async function onSync() {
   try {
     const r = await triggerSync()
     showToast(r.message || '已触发')
+    if (r.skipped) return
     syncing.value = true
     startSyncPolling()
   } catch (e) {
-    if (e.response && e.response.status === 409) {
-      showToast('同步进行中，请稍候')
-      startSyncPolling()
-    } else {
-      showToast('触发失败：' + (e.message || '后端未启动'))
-    }
+    showToast('触发失败：' + (e.message || ''))
   }
 }
 
 async function onSyncMa() {
   try {
-    // 日常更新走增量（只拉缺失/过期标的）；全量强制重拉由后端按交易日自动判断
+    // 日常更新走增量（只拉缺失/过期标的）；全量强制重拉由同步服务按交易日自动判断
     const r = await triggerMaSync(false)
     showToast(r.message || '均线同步已开始，约3~5分钟')
+    if (r.skipped) return
     maSyncing.value = true
     maSyncNeeded.value = false
     startSyncPolling()
   } catch (e) {
-    if (e.response && e.response.status === 409) {
-      showToast('均线同步进行中，请稍候')
-      maSyncing.value = true
-      startSyncPolling()
-    } else {
-      showToast('触发失败：' + (e.response?.data?.error || e.message || '后端未启动'))
-    }
+    showToast('触发失败：' + (e.message || ''))
   }
 }
 
@@ -511,14 +471,10 @@ async function onScan() {
   } catch (e) {
     scanResults.value = []
     scanResult.value = null
-    // 后端业务错误（如均线未同步）优先展示原文，并给出一键同步入口
-    const beMsg = e.response && e.response.data && e.response.data.error
-    if (beMsg) {
-      maSyncNeeded.value = /均线/.test(beMsg)
-      errorMsg.value = beMsg
-    } else {
-      errorMsg.value = '扫描失败：' + (e.message || '后端未启动') + '。手机使用请先在右上角设置后端地址。'
-    }
+    // 本地业务错误（如均线未同步）展示原文，并给出一键同步入口
+    const msg = e.message || ''
+    maSyncNeeded.value = /均线/.test(msg)
+    errorMsg.value = msg || '扫描失败'
   } finally {
     loading.value = false
   }
@@ -533,24 +489,11 @@ async function onSearch() {
   loading.value = true
   errorMsg.value = ''
   try {
-    const results = await searchStocks(keyword.value.trim())
-    // 本地按勾选周期计算五行与综合评分（搜索不做属性硬过滤，仅评分展示）
-    const periodData = YuanhaiDecisionModel.periodAnalyses(new Date())
-    searchResults.value = results.map(s => {
-      const elem = StockElementAnalyzer.combined_element(s.name)
-      const info = YuanhaiDecisionModel.compositeScore(elem, periodData, periods.value, s.name)
-      return {
-        ...s,
-        element: elem,
-        score: info.score,
-        level: info.level,
-        reason: info.reason,
-        periodScores: info.periodScores,
-      }
-    })
+    // searchStocks 已内置本地评分（按勾选周期）
+    searchResults.value = await searchStocks(keyword.value.trim(), periods.value)
     scanResults.value = []
   } catch (e) {
-    errorMsg.value = '搜索失败：' + (e.message || '后端未启动')
+    errorMsg.value = '搜索失败：' + (e.message || '本地数据未就绪')
   } finally {
     loading.value = false
   }
@@ -559,17 +502,6 @@ async function onSearch() {
 function onPickStock(s) {
   keyword.value = s.name
   searchResults.value = []
-}
-
-function openSettings() {
-  backendInput.value = getBackendBase() === '/api' ? '' : getBackendBase()
-  showSettings.value = true
-}
-
-function saveSettings() {
-  setBackendBase(backendInput.value)
-  showSettings.value = false
-  showToast('已保存，可重新扫描验证')
 }
 
 function scoreClass(score) {
@@ -839,6 +771,5 @@ onUnmounted(() => stopSyncPolling())
 
 .tips-card .tip-text { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
 
-.settings-title { font-size: 16px; font-weight: bold; margin-bottom: 12px; text-align: center; }
 .settings-tip { font-size: 12px; color: var(--text-secondary); margin-top: 8px; line-height: 1.5; }
 </style>

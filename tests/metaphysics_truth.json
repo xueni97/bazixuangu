@@ -1,0 +1,561 @@
+{
+  "dates": [
+    {
+      "date": [
+        2026,
+        9,
+        14,
+        12
+      ],
+      "pillars": "丙午 丁酉 辛卯 甲午",
+      "dayMaster": "辛",
+      "dayMasterElement": "金",
+      "dayMasterStrength": "旺",
+      "useGods": [
+        "火",
+        "水",
+        "木"
+      ],
+      "avoidGods": [
+        "土",
+        "金"
+      ],
+      "toneGod": "火",
+      "elementsStrength": {
+        "木": "死",
+        "火": "囚",
+        "土": "休",
+        "金": "旺",
+        "水": "相"
+      },
+      "elementScores": {
+        "木": 2.0,
+        "火": 4.5,
+        "土": 2.0,
+        "金": 5.0,
+        "水": 2.0
+      },
+      "tenGods": {
+        "年": "正官",
+        "月": "七杀",
+        "日": "比肩",
+        "时": "正财"
+      }
+    },
+    {
+      "date": [
+        2026,
+        1,
+        20,
+        10
+      ],
+      "pillars": "乙巳 己丑 甲午 己巳",
+      "dayMaster": "甲",
+      "dayMasterElement": "木",
+      "dayMasterStrength": "弱",
+      "useGods": [
+        "火",
+        "水",
+        "木"
+      ],
+      "avoidGods": [
+        "金",
+        "火",
+        "土"
+      ],
+      "toneGod": "火",
+      "elementsStrength": {
+        "木": "囚",
+        "火": "休",
+        "土": "旺",
+        "金": "相",
+        "水": "死"
+      },
+      "elementScores": {
+        "木": 2.5,
+        "火": 4.0,
+        "土": 7.5,
+        "金": 2.8999999999999995,
+        "水": 0.5
+      },
+      "tenGods": {
+        "年": "劫财",
+        "月": "正财",
+        "日": "比肩",
+        "时": "正财"
+      }
+    },
+    {
+      "date": [
+        2026,
+        2,
+        10,
+        14
+      ],
+      "pillars": "丙午 庚寅 乙卯 癸未",
+      "dayMaster": "乙",
+      "dayMasterElement": "木",
+      "dayMasterStrength": "旺",
+      "useGods": [
+        "金",
+        "火",
+        "土"
+      ],
+      "avoidGods": [
+        "水",
+        "木"
+      ],
+      "toneGod": "金",
+      "elementsStrength": {
+        "木": "旺",
+        "火": "相",
+        "土": "死",
+        "金": "囚",
+        "水": "休"
+      },
+      "elementScores": {
+        "木": 6.3,
+        "火": 5.0,
+        "土": 1.8,
+        "金": 1.5,
+        "水": 2.0
+      },
+      "tenGods": {
+        "年": "伤官",
+        "月": "正官",
+        "日": "比肩",
+        "时": "偏印"
+      }
+    },
+    {
+      "date": [
+        2026,
+        7,
+        15,
+        23,
+        30
+      ],
+      "pillars": "丙午 乙未 辛卯 戊子",
+      "dayMaster": "辛",
+      "dayMasterElement": "金",
+      "dayMasterStrength": "弱",
+      "useGods": [
+        "水",
+        "土",
+        "金"
+      ],
+      "avoidGods": [
+        "火",
+        "水",
+        "木"
+      ],
+      "toneGod": "水",
+      "elementsStrength": {
+        "木": "囚",
+        "火": "休",
+        "土": "旺",
+        "金": "相",
+        "水": "死"
+      },
+      "elementScores": {
+        "木": 2.8,
+        "火": 3.5,
+        "土": 5.5,
+        "金": 3.0,
+        "水": 1.0
+      },
+      "tenGods": {
+        "年": "正官",
+        "月": "偏财",
+        "日": "比肩",
+        "时": "正印"
+      }
+    },
+    {
+      "date": [
+        2026,
+        12,
+        1,
+        8
+      ],
+      "pillars": "丙午 己亥 己酉 戊辰",
+      "dayMaster": "己",
+      "dayMasterElement": "土",
+      "dayMasterStrength": "弱",
+      "useGods": [
+        "火",
+        "土"
+      ],
+      "avoidGods": [
+        "木",
+        "金",
+        "水"
+      ],
+      "toneGod": "火",
+      "elementsStrength": {
+        "木": "相",
+        "火": "死",
+        "土": "囚",
+        "金": "休",
+        "水": "旺"
+      },
+      "elementScores": {
+        "木": 3.0,
+        "火": 2.0,
+        "土": 5.0,
+        "金": 2.0,
+        "水": 4.3
+      },
+      "tenGods": {
+        "年": "正印",
+        "月": "比肩",
+        "日": "比肩",
+        "时": "劫财"
+      }
+    },
+    {
+      "date": [
+        2026,
+        3,
+        21,
+        9
+      ],
+      "pillars": "丙午 辛卯 甲午 己巳",
+      "dayMaster": "甲",
+      "dayMasterElement": "木",
+      "dayMasterStrength": "旺",
+      "useGods": [
+        "金",
+        "火",
+        "土"
+      ],
+      "avoidGods": [
+        "水",
+        "木"
+      ],
+      "toneGod": "金",
+      "elementsStrength": {
+        "木": "旺",
+        "火": "相",
+        "土": "死",
+        "金": "囚",
+        "水": "休"
+      },
+      "elementScores": {
+        "木": 5.0,
+        "火": 6.0,
+        "土": 2.5,
+        "金": 1.8,
+        "水": 1.0
+      },
+      "tenGods": {
+        "年": "食神",
+        "月": "正官",
+        "日": "比肩",
+        "时": "正财"
+      }
+    },
+    {
+      "date": [
+        2026,
+        10,
+        8,
+        15
+      ],
+      "pillars": "丙午 戊戌 乙卯 甲申",
+      "dayMaster": "乙",
+      "dayMasterElement": "木",
+      "dayMasterStrength": "弱",
+      "useGods": [
+        "火",
+        "水",
+        "木"
+      ],
+      "avoidGods": [
+        "金",
+        "火",
+        "土"
+      ],
+      "toneGod": "火",
+      "elementsStrength": {
+        "木": "囚",
+        "火": "休",
+        "土": "旺",
+        "金": "相",
+        "水": "死"
+      },
+      "elementScores": {
+        "木": 3.5,
+        "火": 3.3,
+        "土": 5.8,
+        "金": 3.5,
+        "水": 0.5
+      },
+      "tenGods": {
+        "年": "伤官",
+        "月": "正财",
+        "日": "比肩",
+        "时": "劫财"
+      }
+    },
+    {
+      "date": [
+        2026,
+        5,
+        6,
+        11
+      ],
+      "pillars": "丙午 癸巳 庚辰 壬午",
+      "dayMaster": "庚",
+      "dayMasterElement": "金",
+      "dayMasterStrength": "弱",
+      "useGods": [
+        "水",
+        "土",
+        "金"
+      ],
+      "avoidGods": [
+        "火",
+        "水",
+        "木"
+      ],
+      "toneGod": "水",
+      "elementsStrength": {
+        "木": "休",
+        "火": "旺",
+        "土": "相",
+        "金": "死",
+        "水": "囚"
+      },
+      "elementScores": {
+        "木": 1.5,
+        "火": 7.0,
+        "土": 4.5,
+        "金": 1.3,
+        "水": 2.8
+      },
+      "tenGods": {
+        "年": "七杀",
+        "月": "伤官",
+        "日": "比肩",
+        "时": "食神"
+      }
+    }
+  ],
+  "stocks": [
+    {
+      "name": "贵州茅台",
+      "element": "木",
+      "profile": {
+        "木": 1,
+        "火": 1
+      }
+    },
+    {
+      "name": "平安银行",
+      "element": "金",
+      "profile": {
+        "土": 1,
+        "金": 2
+      }
+    },
+    {
+      "name": "宁德时代",
+      "element": "火",
+      "profile": {
+        "火": 4
+      }
+    },
+    {
+      "name": "中国石化",
+      "element": "水",
+      "profile": {
+        "土": 1,
+        "木": 1,
+        "金": 1,
+        "水": 1
+      }
+    },
+    {
+      "name": "招商银行",
+      "element": "金",
+      "profile": {
+        "金": 4
+      }
+    },
+    {
+      "name": "比亚迪",
+      "element": "水",
+      "profile": {
+        "水": 1,
+        "土": 1,
+        "火": 1
+      }
+    },
+    {
+      "name": "隆基绿能",
+      "element": "火",
+      "profile": {
+        "土": 2,
+        "火": 1
+      }
+    },
+    {
+      "name": "京东方A",
+      "element": "木",
+      "profile": {
+        "木": 1,
+        "水": 1
+      }
+    },
+    {
+      "name": "工商银行",
+      "element": "土",
+      "profile": {
+        "土": 1,
+        "金": 3
+      }
+    },
+    {
+      "name": "药明康德",
+      "element": "木",
+      "profile": {
+        "木": 2,
+        "火": 2
+      }
+    }
+  ],
+  "scores": [
+    {
+      "name": "贵州茅台",
+      "element": "木",
+      "score": 11,
+      "level": "中性",
+      "periodScores": {
+        "monthly": -11,
+        "weekly": 33,
+        "daily": 33
+      }
+    },
+    {
+      "name": "平安银行",
+      "element": "金",
+      "score": -1,
+      "level": "中性",
+      "periodScores": {
+        "monthly": 1,
+        "weekly": -3,
+        "daily": -3
+      }
+    },
+    {
+      "name": "宁德时代",
+      "element": "火",
+      "score": 85,
+      "level": "强烈推荐",
+      "periodScores": {
+        "monthly": 70,
+        "weekly": 70,
+        "daily": 70
+      }
+    },
+    {
+      "name": "中国石化",
+      "element": "水",
+      "score": 11,
+      "level": "中性",
+      "periodScores": {
+        "monthly": -7,
+        "weekly": 29,
+        "daily": 29
+      }
+    },
+    {
+      "name": "招商银行",
+      "element": "金",
+      "score": 2,
+      "level": "中性",
+      "periodScores": {
+        "monthly": -5,
+        "weekly": 10,
+        "daily": 10
+      }
+    },
+    {
+      "name": "比亚迪",
+      "element": "水",
+      "score": 16,
+      "level": "推荐",
+      "periodScores": {
+        "monthly": -2,
+        "weekly": 34,
+        "daily": 34
+      }
+    },
+    {
+      "name": "隆基绿能",
+      "element": "火",
+      "score": 70,
+      "level": "强烈推荐",
+      "periodScores": {
+        "monthly": 55,
+        "weekly": 55,
+        "daily": 55
+      }
+    },
+    {
+      "name": "京东方A",
+      "element": "木",
+      "score": -12,
+      "level": "谨慎",
+      "periodScores": {
+        "monthly": -34,
+        "weekly": 10,
+        "daily": 10
+      }
+    },
+    {
+      "name": "工商银行",
+      "element": "土",
+      "score": 10,
+      "level": "中性",
+      "periodScores": {
+        "monthly": 36,
+        "weekly": -16,
+        "daily": -16
+      }
+    },
+    {
+      "name": "药明康德",
+      "element": "木",
+      "score": 11,
+      "level": "中性",
+      "periodScores": {
+        "monthly": -11,
+        "weekly": 33,
+        "daily": 33
+      }
+    }
+  ],
+  "directions": {
+    "daily": {
+      "date": "2026-09-14",
+      "day_master": "辛",
+      "day_master_strength": "旺",
+      "use_gods": [
+        "火",
+        "水",
+        "木"
+      ],
+      "avoid_gods": [
+        "土",
+        "金"
+      ],
+      "tone_god": "火"
+    },
+    "buyPoint": {
+      "signal_score": 40,
+      "action": "买入"
+    }
+  }
+}
