@@ -62,4 +62,12 @@ export async function triggerSync() {
   return data
 }
 
+/** 手动触发均线(144/288)日K同步，force=true 强制重拉当日 */
+export async function triggerMaSync(force = false) {
+  const { data } = await api.post('/sync/ma', null, {
+    params: force ? { force: 1 } : {},
+  })
+  return data
+}
+
 export default api

@@ -33,6 +33,8 @@ from data_sync import (  # noqa: E402
     get_conn,
     get_spot_count,
     get_state,
+    near_ma,
+    sync_ma_async,
     sync_spot,
     sync_spot_async,
 )
@@ -146,6 +148,8 @@ def scan():
       elements: 逗号分隔五行筛选（木火土金水，空=全部）
       markets: 逗号分隔市场筛选（沪,深,北交所，空=全部）
       min_price/max_price: 价格区间（仅快照有价格时生效）
+      ma: 逗号分隔均线条件，可选 144,288（回踩至均线附近，多选为同时满足）
+      ma_tol: 均线附近容差（默认0.03=±3%，范围0.5%~10%）
       min_score（默认10）、limit（默认100）
     """
     if not DB_PATH.exists():
@@ -163,6 +167,18 @@ def scan():
     raw_periods = request.args.get("periods", "daily")
     selected = [p for p in ("monthly", "weekly", "daily")
                 if p in raw_periods.split(",")] or ["daily"]
+
+    # 均线附加指标勾选（144/288 日线，多选为"同时回踩"共振）
+    ma_windows = []
+    for w in request.args.get("ma", "").split(","):
+        w = w.strip()
+        if w in ("144", "288") and int(w) not in ma_windows:
+            ma_windows.append(int(w))
+    try:
+        ma_tol = float(request.args.get("ma_tol", 0.03))
+    except (TypeError, ValueError):
+        ma_tol = 0.03
+    ma_tol = min(0.10, max(0.005, ma_tol))
 
     # 属性/市场/价格筛选
     elem_filter = {e for e in request.args.get("elements", "").split(",") if e}
@@ -207,8 +223,23 @@ def scan():
     try:
         ensure_tables(conn)
         rows, source = _get_universe(conn)
+        # 均线表（可能尚未同步：表为空）
+        ma_rows = conn.execute(
+            "SELECT symbol, trade_date, close, high20, ma144, ma288 FROM stock_ma"
+        ).fetchall()
+        ma_meta = conn.execute(
+            "SELECT value FROM sync_meta WHERE key='ma_trade_date'"
+        ).fetchone()
     finally:
         conn.close()
+
+    ma_map = {r[0]: r for r in ma_rows}
+    ma_trade_date = ma_meta[0] if ma_meta else None
+    if ma_windows and not ma_trade_date:
+        return _json_err(
+            "均线指标尚未同步：请先点右侧「更新均线(144/288)」完成日K同步（首次约3~5分钟）",
+            400,
+        )
 
     results = []
     for row in rows:
@@ -230,12 +261,35 @@ def scan():
         if elem_filter and elem not in elem_filter:
             continue
 
+        # ── 硬过滤：回踩 144/288 日均线附近 ──
+        # 无快照价时退用日K最新收盘（名称库场景）
+        mrow = ma_map.get(symbol)
+        ref_price = price
+        ma144 = ma288 = high20 = kclose = ma_date = None
+        if mrow:
+            ma_date, kclose, high20, ma144, ma288 = (
+                mrow[1], mrow[2], mrow[3], mrow[4], mrow[5])
+            if ref_price is None:
+                ref_price = kclose
+        if ma_windows:
+            if not mrow:
+                continue
+            ma_hit = True
+            for w in ma_windows:
+                ma_val = ma144 if w == 144 else ma288
+                hit, _ = near_ma(ref_price, ma_val, high20, ma_tol)
+                if not hit:
+                    ma_hit = False
+                    break
+            if not ma_hit:
+                continue
+
         info = YuanhaiDecisionModel.composite_score(
             elem, period_data, selected, stock_name=name)
         if info["score"] < min_score:
             continue
 
-        results.append({
+        item = {
             "symbol": symbol,
             "name": name,
             "element": elem,
@@ -249,7 +303,19 @@ def scan():
             "price": price,
             "changePct": change_pct,
             "market": market,
-        })
+        }
+        # 均线附加信息（有则带，供前端展示距离标签，不依赖勾选）
+        if mrow:
+            item["maDate"] = ma_date
+            if ma144:
+                _, d144 = near_ma(ref_price, ma144, high20, 1.0)
+                item["ma144"] = ma144
+                item["dist144"] = d144
+            if ma288:
+                _, d288 = near_ma(ref_price, ma288, high20, 1.0)
+                item["ma288"] = ma288
+                item["dist288"] = d288
+        results.append(item)
 
     results.sort(key=lambda x: x["score"], reverse=True)
     results = results[:limit]
@@ -264,6 +330,9 @@ def scan():
         "avoidGods": daily_analysis.avoid_gods,
         "toneGod": daily_analysis.tone_god,
         "periods": period_meta,
+        "maFilter": ma_windows,
+        "maTol": ma_tol,
+        "maTradeDate": ma_trade_date,
         "dataSource": source,
         "totalScanned": len(rows),
         "totalMatched": len(results),
@@ -301,6 +370,16 @@ def sectors():
 def trigger_sync():
     """手动触发全市场快照同步。"""
     result = sync_spot_async()
+    if not result["ok"] and "进行中" in result["message"]:
+        return jsonify(result), 409
+    return jsonify(result)
+
+
+@api.route("/sync/ma", methods=["POST"])
+def trigger_ma_sync():
+    """手动触发 144/288 日均线日K同步（force=1 可强制重跑）。"""
+    force = request.args.get("force") in ("1", "true")
+    result = sync_ma_async(force=force)
     if not result["ok"] and "进行中" in result["message"]:
         return jsonify(result), 409
     return jsonify(result)

@@ -326,14 +326,168 @@ def test_composite_score_weighted_and_resonance():
     assert full["score"] == expected
 
 
+# ── 144/288 均线指标 ────────────────────────────────────────
+
+
+def test_parse_em_klines():
+    """东财K线字符串解析：date,open,close 取第3列，'-'/坏行跳过。"""
+    payload = {"data": {"klines": [
+        "2026-09-10,10.00,10.50,11.00,9.50,100,1000,0.5",
+        "bad,1",
+        "2026-09-11,10.50,-,11,10,200,2000,0",
+    ]}}
+    rows = data_sync._parse_em_klines(payload)
+    assert rows == [("2026-09-10", 10.5)]
+
+
+def test_parse_tx_klines():
+    """腾讯 qfqday/day 两种键都能解析。"""
+    payload = {"data": {"sh600519": {"qfqday": [
+        ["2026-09-10", "10.00", "10.50", "11.00", "9.50", "100"],
+    ]}}}
+    assert data_sync._parse_tx_klines(payload, "sh600519") == [("2026-09-10", 10.5)]
+    payload2 = {"data": {"sz000001": {"day": [["2026-09-11", "12", "12.1", "12.2", "11.9", "0"]]}}}
+    assert data_sync._parse_tx_klines(payload2, "sz000001") == [("2026-09-11", 12.1)]
+
+
+def test_parse_sina_klines():
+    """新浪 getKLineData 数组解析。"""
+    payload = [
+        {"day": "2026-09-10", "open": "10.0", "high": "11", "low": "9.5",
+         "close": "10.50", "volume": "100"},
+        {"day": "2026-09-11", "open": "10.5", "high": "10.8", "low": "10.2",
+         "close": "10.7", "volume": "80"},
+    ]
+    assert data_sync._parse_sina_klines(payload) == [
+        ("2026-09-10", 10.5), ("2026-09-11", 10.7)]
+    assert data_sync._parse_sina_klines([]) == []
+
+
+def test_compute_ma_snapshot():
+    """上市不足144日→None；200日有ma144无ma288；300日均线与high20正确。"""
+    kl = lambda closes: [(f"d{i:03d}", c) for i, c in enumerate(closes)]
+
+    assert data_sync.compute_ma_snapshot("x", kl([10.0] * 100)) is None
+
+    snap200 = data_sync.compute_ma_snapshot("x", kl([10.0] * 200))
+    assert snap200["ma144"] == 10.0 and snap200["ma288"] is None
+    assert snap200["high20"] == 10.0 and snap200["bars"] == 200
+
+    closes = [10.0] * 280 + [12.0] * 19 + [10.0]  # 共300根
+    snap = data_sync.compute_ma_snapshot("x", kl(closes))
+    assert snap["ma288"] == round((269 * 10 + 19 * 12) / 288, 4)
+    # 不含当日的最近20根：1根10 + 19根12 → 最高12
+    assert snap["high20"] == 12.0
+    assert snap["close"] == 10.0 and snap["trade_date"] == "d299"
+
+
+def test_near_ma():
+    """回踩均线：带内容差 + 此前20日曾站上上沿，两条件同时满足。"""
+    hit, dist = data_sync.near_ma(10.0, 10.0, 10.5, 0.03)
+    assert hit and dist == 0.0
+    # 贴着均线但此前一直在线附近徘徊（无回踩）→ 不命中
+    assert data_sync.near_ma(10.0, 10.0, 10.2, 0.03)[0] is False
+    # 偏离超过容差 → 不命中，但返回距离
+    hit, dist = data_sync.near_ma(10.5, 10.0, 10.5, 0.03)
+    assert hit is False and dist == 0.05
+    # -3% 边界（含）仍算附近
+    assert data_sync.near_ma(9.7, 10.0, 10.5, 0.03)[0] is True
+    # 缺数据
+    assert data_sync.near_ma(None, 10.0, 10.5, 0.03) == (False, None)
+    assert data_sync.near_ma(10.0, None, 10.5, 0.03) == (False, None)
+
+
+def test_scan_ma_requires_sync(client):
+    """勾选均线但 stock_ma 从未同步 → 400 并提示先同步。"""
+    resp = client.get("/api/scan?min_score=-100&ma=144")
+    assert resp.status_code == 400
+    assert "均线" in resp.get_json()["error"]
+
+
+def test_scan_ma_filter(client, temp_db):
+    """ma=144 仅保留回踩144日线的标的；结果带均线与距离字段。"""
+    conn = sqlite3.connect(str(temp_db))
+    data_sync.ensure_tables(conn)  # 补建 stock_ma 表
+    conn.executemany(
+        "INSERT INTO stock_spot VALUES (?, ?, ?, ?, ?, ?)",
+        [("600519", "贵州茅台", 10.0, 0.0, "沪", "2026-09-12"),
+         ("000001", "平安银行", 10.0, 0.0, "深", "2026-09-12")],
+    )
+    conn.execute(
+        "INSERT INTO sync_meta VALUES ('ma_trade_date', '2026-09-11')")
+    conn.executemany(
+        "INSERT INTO stock_ma (symbol, trade_date, close, high20, bars, ma144, ma288, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [("600519", "2026-09-11", 10.0, 11.0, 300, 10.0, 9.9, "t"),  # 回踩144/288
+         ("000001", "2026-09-11", 10.0, 12.5, 300, 12.0, 12.0, "t")],  # 偏离-16.7%
+    )
+    conn.commit()
+    conn.close()
+
+    body = client.get("/api/scan?min_score=-100&ma=144").get_json()
+    assert body["maFilter"] == [144] and body["maTradeDate"] == "2026-09-11"
+    assert {r["symbol"] for r in body["results"]} == {"600519"}
+    row = body["results"][0]
+    assert row["ma144"] == 10.0 and row["dist144"] == 0.0
+    assert row["ma288"] == 9.9
+
+    # 双均线共振：288 数据缺失者同样被剔除
+    body2 = client.get("/api/scan?min_score=-100&ma=144,288&ma_tol=0.05").get_json()
+    assert {r["symbol"] for r in body2["results"]} == {"600519"}
+
+    # 不勾选均线：均线字段仍随结果下发（供展示距离标签）
+    body3 = client.get("/api/scan?min_score=-100").get_json()
+    by = {r["symbol"]: r for r in body3["results"]}
+    assert by["600519"]["dist144"] == 0.0
+    assert by["000001"]["dist144"] == round(10 / 12 - 1, 4)
+
+
 def test_sync_endpoints(client, monkeypatch):
-    monkeypatch.setattr("data_sync.sync_spot_async", lambda: {"ok": True, "message": "已启动后台同步"})
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "sync_spot_async",
+                        lambda: {"ok": True, "message": "已启动后台同步"})
+    monkeypatch.setattr(app_module, "sync_ma_async",
+                        lambda force=False: {"ok": True, "message": "已启动均线后台同步"})
     resp = client.post("/api/sync")
     assert resp.status_code == 200
+
+    resp = client.post("/api/sync/ma")
+    assert resp.status_code == 200 and resp.get_json()["ok"] is True
 
     resp = client.get("/api/sync/status")
     body = resp.get_json()
     assert "status" in body and "last_success_date" in body
+    for k in ("ma_status", "ma_phase", "ma_trade_date", "ma_count"):
+        assert k in body
+
+
+def test_sync_ma_pipeline(temp_db, monkeypatch):
+    """均线同步状态机：并发拉取→计算→落 stock_ma + meta（全程不联网）。"""
+    # 名称库 5 只标的，每只 300 根收盘 10 的日K（末日=目标交易日）
+    klines = [(f"2025-{i // 30 + 1:02d}-{i % 28 + 1:02d}", 10.0) for i in range(300)]
+    klines[-1] = ("2026-09-12", 10.0)
+    monkeypatch.setattr(data_sync, "_latest_trade_date", lambda s: "2026-09-12")
+    monkeypatch.setattr(data_sync, "fetch_symbol_klines_ex",
+                        lambda sym: (list(klines), "em"))
+
+    result = data_sync.sync_ma(force=True)
+    assert result["ok"] is True and result["count"] == 5
+    assert result["trade_date"] == "2026-09-12"
+
+    st = data_sync.get_ma_state()
+    assert st["ma_status"] == "idle" and st["ma_count"] == 5
+    assert st["ma_trade_date"] == "2026-09-12"
+
+    conn = sqlite3.connect(str(temp_db))
+    row = conn.execute(
+        "SELECT ma144, ma288, bars, source FROM stock_ma WHERE symbol='600519'").fetchone()
+    conn.close()
+    assert row == (10.0, 10.0, 300, "em")
+
+    # 同一交易日再跑 → 跳过
+    again = data_sync.sync_ma()
+    assert again.get("skipped") is True
 
 
 def test_index_spa_fallback(client):

@@ -64,6 +64,28 @@
             <input v-model="maxPrice" class="price-input" type="number" placeholder="最高" />
             <span class="filter-hint">元（留空不限）</span>
           </div>
+          <div class="filter-row">
+            <span class="filter-label">均线指标</span>
+            <div class="chip-group">
+              <span
+                class="filter-chip" :class="{ active: selectedMa.includes(144) }"
+                @click="toggleMa(144)"
+              >回踩144日线</span>
+              <span
+                class="filter-chip" :class="{ active: selectedMa.includes(288) }"
+                @click="toggleMa(288)"
+              >回踩288日线</span>
+            </div>
+            <template v-if="selectedMa.length">
+              <span class="filter-hint">容差</span>
+              <select v-model="maTol" class="tol-select">
+                <option :value="0.01">±1%</option>
+                <option :value="0.03">±3%</option>
+                <option :value="0.05">±5%</option>
+              </select>
+              <span class="filter-hint">且前20日曾站上均线</span>
+            </template>
+          </div>
         </div>
 
         <div v-if="scanResult" class="scan-summary">
@@ -71,6 +93,12 @@
             <van-tag plain type="primary">日期 {{ scanResult.date }}</van-tag>
             <van-tag plain :type="scanResult.dataSource === 'spot' ? 'success' : 'warning'">
               {{ scanResult.dataSource === 'spot' ? '全市场快照' : '名称库(无价格)' }}
+            </van-tag>
+            <van-tag v-if="scanResult.maFilter && scanResult.maFilter.length" plain type="primary">
+              回踩{{ scanResult.maFilter.join('/') }}日线 ±{{ Math.round(scanResult.maTol * 100) }}%
+            </van-tag>
+            <van-tag v-if="scanResult.maTradeDate" plain type="default">
+              均线 {{ scanResult.maTradeDate }}
             </van-tag>
           </div>
           <!-- 各勾选周期的盘面用神 -->
@@ -88,7 +116,10 @@
 
         <div v-if="errorMsg" class="error-state">
           <van-empty image="error" :description="errorMsg">
-            <van-button size="small" type="primary" @click="openSettings">检查后端设置</van-button>
+            <van-button v-if="maSyncNeeded" size="small" type="primary" @click="onSyncMa">
+              立即更新均线数据
+            </van-button>
+            <van-button size="small" plain @click="openSettings">检查后端设置</van-button>
           </van-empty>
         </div>
 
@@ -153,6 +184,16 @@
               >
                 <em>{{ p.label }}</em>{{ p.score > 0 ? '+' : '' }}{{ p.score }}
               </span>
+            </div>
+            <!-- 144/288 均线距离标签（均线同步后下发） -->
+            <div v-if="s.dist144 !== undefined || s.dist288 !== undefined" class="ma-tags">
+              <span v-if="s.dist144 !== undefined" class="ma-tag" :class="maTagClass(s.dist144)">
+                144线 {{ fmtPct(s.dist144) }}
+              </span>
+              <span v-if="s.dist288 !== undefined" class="ma-tag" :class="maTagClass(s.dist288)">
+                288线 {{ fmtPct(s.dist288) }}
+              </span>
+              <span v-if="s.maDate" class="ma-date">日K {{ s.maDate }}</span>
             </div>
             <div class="stock-bottom">
               <span class="reason">{{ s.reason }}</span>
@@ -219,6 +260,31 @@
               style="margin-top: 10px">
               {{ syncing ? '同步中...' : '立即同步全市场快照' }}
             </van-button>
+
+            <div class="sync-subtitle">均线指标（144/288 日K）</div>
+            <div class="sync-line">
+              <span class="lbl">交易日</span>
+              <span>{{ syncState.maTradeDate || '从未同步' }}<template
+                v-if="syncState.maTradeDate"> · {{ syncState.maCount || 0 }} 只</template></span>
+            </div>
+            <div class="sync-line" v-if="maSyncing">
+              <span class="lbl">进度</span>
+              <span class="syncing-txt">
+                {{ syncState.maPhase || '拉取日K' }}
+                {{ syncState.maDone != null ? syncState.maDone + '/' + syncState.maTotal : '' }}
+              </span>
+            </div>
+            <div class="sync-line" v-if="syncState.maLastError">
+              <span class="lbl">均线错误</span>
+              <span class="err-txt">{{ syncState.maLastError }}</span>
+            </div>
+            <van-button size="small" type="warning" plain block :loading="maSyncing"
+              @click="onSyncMa" style="margin-top: 6px">
+              {{ maSyncing ? '均线同步中...' : '更新均线(144/288)' }}
+            </van-button>
+            <p class="settings-tip" style="margin: 6px 0 0">
+              全市场日K并发拉取，首次约3~5分钟；每个交易日更新一次即可。
+            </p>
           </div>
         </div>
 
@@ -248,7 +314,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { showToast } from 'vant'
 import {
-  scanStocks, searchStocks, getSectors, getSyncStatus, triggerSync,
+  scanStocks, searchStocks, getSectors, getSyncStatus, triggerSync, triggerMaSync,
   getBackendBase, setBackendBase,
 } from '../api'
 import { StockElementAnalyzer, YuanhaiDecisionModel } from '../core'
@@ -270,6 +336,10 @@ const selectedElements = ref([])
 const selectedMarkets = ref([])
 const minPrice = ref('')
 const maxPrice = ref('')
+// 144/288 均线附加指标（空数组=不启用）
+const selectedMa = ref([])
+const maTol = ref(0.03)
+const maSyncNeeded = ref(false)
 
 function toggleElement(e) {
   const i = selectedElements.value.indexOf(e)
@@ -281,6 +351,21 @@ function toggleMarket(m) {
   const i = selectedMarkets.value.indexOf(m)
   if (i === -1) selectedMarkets.value.push(m)
   else selectedMarkets.value.splice(i, 1)
+}
+
+function toggleMa(w) {
+  const i = selectedMa.value.indexOf(w)
+  if (i === -1) selectedMa.value.push(w)
+  else selectedMa.value.splice(i, 1)
+}
+
+// 均线距离展示：带符号百分比；命中容差区间时高亮
+function fmtPct(dist) {
+  return (dist >= 0 ? '+' : '') + (dist * 100).toFixed(1) + '%'
+}
+function maTagClass(dist) {
+  const tol = scanResult.value?.maTol ?? maTol.value
+  return Math.abs(dist) <= tol + 1e-9 ? 'ma-near' : 'ma-far'
 }
 
 // 结果行按勾选顺序输出分项分（月→周→日）
@@ -297,11 +382,16 @@ function buildScanParams() {
   if (selectedMarkets.value.length) params.markets = selectedMarkets.value.join(',')
   if (minPrice.value !== '') params.min_price = minPrice.value
   if (maxPrice.value !== '') params.max_price = maxPrice.value
+  if (selectedMa.value.length) {
+    params.ma = selectedMa.value.join(',')
+    params.ma_tol = maTol.value
+  }
   return params
 }
 
 const syncState = ref({})
 const syncing = ref(false)
+const maSyncing = ref(false)
 let syncTimer = null
 
 const showSettings = ref(false)
@@ -324,12 +414,27 @@ async function refreshSyncStatus(silent = true) {
   try {
     const st = await getSyncStatus()
     const wasSyncing = syncing.value
+    const wasMaSyncing = maSyncing.value
     syncing.value = st.status === 'syncing'
-    syncState.value = { ...st, spotCount: st.spot_count }
-    // 同步从进行中变为结束 → 刷新分布图，并提示
+    maSyncing.value = st.ma_status === 'syncing'
+    syncState.value = {
+      ...st,
+      spotCount: st.spot_count,
+      maCount: st.ma_count,
+      maTradeDate: st.ma_trade_date,
+      maPhase: st.ma_phase,
+      maDone: st.ma_done,
+      maTotal: st.ma_total,
+      maLastError: st.ma_last_error,
+    }
+    // 快照同步从进行中变为结束 → 刷新分布图，并提示
     if (wasSyncing && !syncing.value) {
       loadSectors()
-      showToast(st.lastError ? '同步失败' : '数据同步完成')
+      showToast(st.lastError ? '快照同步失败' : '快照同步完成')
+    }
+    // 均线同步结束提示
+    if (wasMaSyncing && !maSyncing.value) {
+      showToast(st.ma_last_error ? '均线同步失败' : '均线同步完成')
     }
   } catch {
     if (!silent) showToast('无法获取同步状态：后端未启动')
@@ -340,7 +445,7 @@ function startSyncPolling() {
   stopSyncPolling()
   syncTimer = setInterval(() => {
     refreshSyncStatus()
-    if (!syncing.value) stopSyncPolling()
+    if (!syncing.value && !maSyncing.value) stopSyncPolling()
   }, 2000)
 }
 
@@ -364,6 +469,25 @@ async function onSync() {
   }
 }
 
+async function onSyncMa() {
+  try {
+    // 日常更新走增量（只拉缺失/过期标的）；全量强制重拉由后端按交易日自动判断
+    const r = await triggerMaSync(false)
+    showToast(r.message || '均线同步已开始，约3~5分钟')
+    maSyncing.value = true
+    maSyncNeeded.value = false
+    startSyncPolling()
+  } catch (e) {
+    if (e.response && e.response.status === 409) {
+      showToast('均线同步进行中，请稍候')
+      maSyncing.value = true
+      startSyncPolling()
+    } else {
+      showToast('触发失败：' + (e.response?.data?.error || e.message || '后端未启动'))
+    }
+  }
+}
+
 async function loadSectors() {
   try {
     sectorCounts.value = await getSectors()
@@ -377,6 +501,7 @@ async function onScan() {
   }
   loading.value = true
   errorMsg.value = ''
+  maSyncNeeded.value = false
   try {
     const data = await scanStocks(buildScanParams())
     scanResult.value = data
@@ -386,7 +511,14 @@ async function onScan() {
   } catch (e) {
     scanResults.value = []
     scanResult.value = null
-    errorMsg.value = '扫描失败：' + (e.message || '后端未启动') + '。手机使用请先在右上角设置后端地址。'
+    // 后端业务错误（如均线未同步）优先展示原文，并给出一键同步入口
+    const beMsg = e.response && e.response.data && e.response.data.error
+    if (beMsg) {
+      maSyncNeeded.value = /均线/.test(beMsg)
+      errorMsg.value = beMsg
+    } else {
+      errorMsg.value = '扫描失败：' + (e.message || '后端未启动') + '。手机使用请先在右上角设置后端地址。'
+    }
   } finally {
     loading.value = false
   }
@@ -586,6 +718,41 @@ onUnmounted(() => stopSyncPolling())
   border: 1px solid rgba(255,255,255,0.2);
   color: var(--text-secondary);
   flex-shrink: 0;
+}
+
+/* ── 144/288 均线距离标签 ── */
+.ma-tags { display: flex; gap: 6px; margin: 6px 0 2px; flex-wrap: wrap; align-items: center; }
+.ma-tag {
+  font-size: 11px;
+  font-family: monospace;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--text-secondary);
+  background: rgba(255,255,255,0.06);
+}
+.ma-tag.ma-near {
+  color: #fff;
+  border-color: #e94560;
+  background: rgba(233,69,96,0.28);
+  font-weight: bold;
+}
+.ma-date { font-size: 10px; color: var(--text-secondary); }
+
+.tol-select {
+  font-size: 12px;
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px;
+  padding: 3px 4px;
+}
+.sync-subtitle {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  font-size: 13px;
+  font-weight: bold;
 }
 
 .scan-summary {
