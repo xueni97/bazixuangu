@@ -21,21 +21,65 @@
           </div>
         </div>
 
+        <!-- 周期叠加 + 属性筛选 -->
+        <div class="filter-card">
+          <div class="filter-row">
+            <span class="filter-label">周期效应</span>
+            <van-checkbox-group v-model="periods" direction="horizontal" class="period-group">
+              <van-checkbox name="monthly" shape="square" icon-size="15">月</van-checkbox>
+              <van-checkbox name="weekly" shape="square" icon-size="15">周</van-checkbox>
+              <van-checkbox name="daily" shape="square" icon-size="15">日</van-checkbox>
+            </van-checkbox-group>
+            <span class="filter-hint">月0.5/周0.3/日0.2 加权</span>
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">五行属性</span>
+            <div class="chip-group">
+              <span
+                v-for="e in ELEMENT_OPTIONS" :key="e"
+                class="filter-chip"
+                :class="[{ active: selectedElements.includes(e) }, 'bg-' + e]"
+                @click="toggleElement(e)"
+              >{{ e }}</span>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">市场</span>
+            <div class="chip-group">
+              <span
+                class="filter-chip" :class="{ active: selectedMarkets.length === 0 }"
+                @click="selectedMarkets = []"
+              >全部</span>
+              <span
+                v-for="m in MARKET_OPTIONS" :key="m"
+                class="filter-chip" :class="{ active: selectedMarkets.includes(m) }"
+                @click="toggleMarket(m)"
+              >{{ m }}</span>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">价格区间</span>
+            <input v-model="minPrice" class="price-input" type="number" placeholder="最低" />
+            <span class="price-sep">—</span>
+            <input v-model="maxPrice" class="price-input" type="number" placeholder="最高" />
+            <span class="filter-hint">元（留空不限）</span>
+          </div>
+        </div>
+
         <div v-if="scanResult" class="scan-summary">
           <div class="summary-row">
             <van-tag plain type="primary">日期 {{ scanResult.date }}</van-tag>
-            <van-tag plain>四柱 {{ scanResult.pillars }}</van-tag>
             <van-tag plain :type="scanResult.dataSource === 'spot' ? 'success' : 'warning'">
               {{ scanResult.dataSource === 'spot' ? '全市场快照' : '名称库(无价格)' }}
             </van-tag>
           </div>
-          <div class="summary-row">
-            <van-tag plain>日主 {{ scanResult.dayMaster }}</van-tag>
-            <van-tag plain :type="scanResult.dayMasterStrength === '弱' ? 'warning' : 'success'">
-              {{ scanResult.dayMasterStrength }}
-            </van-tag>
+          <!-- 各勾选周期的盘面用神 -->
+          <div v-for="p in scanResult.periods" :key="p.key" class="period-summary">
+            <span class="period-name">{{ p.label }}效应</span>
+            <span class="period-date">{{ p.date }}</span>
+            <span class="period-pillars">{{ p.pillars }}</span>
             <span class="use-label">用神:</span>
-            <span v-for="e in scanResult.useGods" :key="e" class="god-tag" :class="'bg-' + e">{{ e }}</span>
+            <span v-for="g in p.useGods" :key="g" class="god-tag" :class="'bg-' + g">{{ g }}</span>
           </div>
           <div class="stat-row">
             扫描 {{ scanResult.totalScanned }} 只 | 命中 {{ scanResult.totalMatched }} 只
@@ -49,17 +93,37 @@
         </div>
 
         <div v-if="searchResults.length" class="search-section">
-          <div class="section-title">搜索结果</div>
+          <div class="section-title">搜索结果（本地综合评分）</div>
           <div v-for="s in searchResults" :key="s.symbol" class="stock-row" @click="onPickStock(s)">
-            <div class="stock-main">
-              <span class="code">{{ s.symbol }}</span>
-              <span class="name">{{ s.name }}</span>
-              <span v-if="s.element" class="elem" :class="'element-' + s.element">{{ s.element }}</span>
+            <div class="stock-top">
+              <div class="stock-main">
+                <span class="code">{{ s.symbol }}</span>
+                <span class="name">{{ s.name }}</span>
+                <span v-if="s.element" class="elem" :class="'element-' + s.element">{{ s.element }}</span>
+                <span v-if="s.market" class="market-tag">{{ s.market }}</span>
+              </div>
+              <div class="stock-score">
+                <div class="score-num" :class="scoreClass(s.score)">{{ s.score > 0 ? '+' : '' }}{{ s.score }}</div>
+                <div class="score-level">{{ s.level }}</div>
+              </div>
             </div>
-            <div v-if="s.price" class="quote-mini">
-              <span class="price">{{ s.price.toFixed(2) }}</span>
-              <span class="chg" :class="s.changePct >= 0 ? 'up' : 'down'">
-                {{ s.changePct >= 0 ? '+' : '' }}{{ s.changePct ? s.changePct.toFixed(2) : '0.00' }}%
+            <!-- 月/周/日分项评分 -->
+            <div v-if="s.periodScores" class="period-scores">
+              <span
+                v-for="p in periodList(s)" :key="p.key"
+                class="period-score"
+                :class="scoreClass(p.score)"
+              >
+                <em>{{ p.label }}</em>{{ p.score > 0 ? '+' : '' }}{{ p.score }}
+              </span>
+            </div>
+            <div class="stock-bottom">
+              <span class="reason">{{ s.reason }}</span>
+              <span v-if="s.price" class="quote-mini">
+                <span class="price">{{ s.price.toFixed(2) }}</span>
+                <span class="chg" :class="s.changePct >= 0 ? 'up' : 'down'">
+                  {{ s.changePct >= 0 ? '+' : '' }}{{ s.changePct ? s.changePct.toFixed(2) : '0.00' }}%
+                </span>
               </span>
             </div>
           </div>
@@ -73,11 +137,22 @@
                 <span class="code">{{ s.symbol }}</span>
                 <span class="name">{{ s.name }}</span>
                 <span class="elem" :class="'element-' + s.element">{{ s.element }}</span>
+                <span v-if="s.market" class="market-tag">{{ s.market }}</span>
               </div>
               <div class="stock-score">
                 <div class="score-num" :class="scoreClass(s.score)">{{ s.score > 0 ? '+' : '' }}{{ s.score }}</div>
                 <div class="score-level">{{ s.level }}</div>
               </div>
+            </div>
+            <!-- 月/周/日分项评分 -->
+            <div v-if="s.periodScores" class="period-scores">
+              <span
+                v-for="p in periodList(s)" :key="p.key"
+                class="period-score"
+                :class="scoreClass(p.score)"
+              >
+                <em>{{ p.label }}</em>{{ p.score > 0 ? '+' : '' }}{{ p.score }}
+              </span>
             </div>
             <div class="stock-bottom">
               <span class="reason">{{ s.reason }}</span>
@@ -176,7 +251,7 @@ import {
   scanStocks, searchStocks, getSectors, getSyncStatus, triggerSync,
   getBackendBase, setBackendBase,
 } from '../api'
-import { StockElementAnalyzer, YuanhaiDecisionModel, BaziEngine } from '../core'
+import { StockElementAnalyzer, YuanhaiDecisionModel } from '../core'
 
 const keyword = ref('')
 const loading = ref(false)
@@ -185,6 +260,45 @@ const scanResult = ref(null)
 const scanResults = ref([])
 const searchResults = ref([])
 const sectorCounts = ref(null)
+
+// ── 多周期叠加 + 属性筛选状态 ──
+const ELEMENT_OPTIONS = ['木', '火', '土', '金', '水']
+const MARKET_OPTIONS = ['沪', '深', '北交所']
+const PERIOD_LABEL = { monthly: '月', weekly: '周', daily: '日' }
+const periods = ref(['monthly', 'weekly', 'daily'])
+const selectedElements = ref([])
+const selectedMarkets = ref([])
+const minPrice = ref('')
+const maxPrice = ref('')
+
+function toggleElement(e) {
+  const i = selectedElements.value.indexOf(e)
+  if (i === -1) selectedElements.value.push(e)
+  else selectedElements.value.splice(i, 1)
+}
+
+function toggleMarket(m) {
+  const i = selectedMarkets.value.indexOf(m)
+  if (i === -1) selectedMarkets.value.push(m)
+  else selectedMarkets.value.splice(i, 1)
+}
+
+// 结果行按勾选顺序输出分项分（月→周→日）
+function periodList(stock) {
+  return periods.value
+    .map((key) => ({ key, label: PERIOD_LABEL[key], score: stock.periodScores?.[key]?.score }))
+    .filter((p) => p.score !== undefined)
+}
+
+// 组装扫描/筛选参数（键名与后端 snake_case 对齐）
+function buildScanParams() {
+  const params = { min_score: 10, limit: 200, periods: periods.value.join(',') }
+  if (selectedElements.value.length) params.elements = selectedElements.value.join(',')
+  if (selectedMarkets.value.length) params.markets = selectedMarkets.value.join(',')
+  if (minPrice.value !== '') params.min_price = minPrice.value
+  if (maxPrice.value !== '') params.max_price = maxPrice.value
+  return params
+}
 
 const syncState = ref({})
 const syncing = ref(false)
@@ -257,10 +371,14 @@ async function loadSectors() {
 }
 
 async function onScan() {
+  if (!periods.value.length) {
+    showToast('请至少勾选一个周期效应')
+    return
+  }
   loading.value = true
   errorMsg.value = ''
   try {
-    const data = await scanStocks({ minScore: 10, limit: 200 })
+    const data = await scanStocks(buildScanParams())
     scanResult.value = data
     scanResults.value = data.results || []
     searchResults.value = []
@@ -276,17 +394,27 @@ async function onScan() {
 
 async function onSearch() {
   if (!keyword.value.trim()) return
+  if (!periods.value.length) {
+    showToast('请至少勾选一个周期效应')
+    return
+  }
   loading.value = true
   errorMsg.value = ''
   try {
     const results = await searchStocks(keyword.value.trim())
-    // 本地计算五行与评分
-    const pillars = BaziEngine.from_datetime(new Date())
-    const analysis = YuanhaiDecisionModel.analyze(pillars)
+    // 本地按勾选周期计算五行与综合评分（搜索不做属性硬过滤，仅评分展示）
+    const periodData = YuanhaiDecisionModel.periodAnalyses(new Date())
     searchResults.value = results.map(s => {
       const elem = StockElementAnalyzer.combined_element(s.name)
-      const info = YuanhaiDecisionModel.stock_score(elem, analysis, s.name)
-      return { ...s, element: elem, score: info.score, level: info.level, reason: info.reason }
+      const info = YuanhaiDecisionModel.compositeScore(elem, periodData, periods.value, s.name)
+      return {
+        ...s,
+        element: elem,
+        score: info.score,
+        level: info.level,
+        reason: info.reason,
+        periodScores: info.periodScores,
+      }
     })
     scanResults.value = []
   } catch (e) {
@@ -344,7 +472,7 @@ onUnmounted(() => stopSyncPolling())
     align-items: start;
   }
   .col-side { display: block; position: sticky; top: 12px; }
-  .scan-controls, .scan-summary, .search-section, .scan-results,
+  .scan-controls, .filter-card, .scan-summary, .search-section, .scan-results,
   .error-state, .loading, .empty-state { padding-left: 0; padding-right: 0; margin-left: 0; margin-right: 0; }
 }
 
@@ -358,6 +486,107 @@ onUnmounted(() => stopSyncPolling())
 .btn-col { display: flex; flex-direction: column; gap: 6px; }
 .scan-btn { flex-shrink: 0; }
 .sync-btn { flex-shrink: 0; }
+
+/* ── 周期叠加 + 属性筛选面板 ── */
+.filter-card {
+  margin: 0 12px 12px;
+  padding: 6px 12px;
+  background: var(--bg-card);
+  border-radius: 10px;
+}
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  flex-wrap: wrap;
+}
+.filter-row + .filter-row { border-top: 1px solid rgba(255,255,255,0.06); }
+.filter-label { font-size: 13px; color: var(--text-secondary); width: 56px; flex-shrink: 0; }
+.filter-hint { font-size: 11px; color: var(--text-secondary); }
+.period-group { display: flex; gap: 16px; flex: 1; }
+.period-group :deep(.van-checkbox__label) { color: var(--text-primary); margin-left: 4px; }
+
+.chip-group { display: flex; gap: 8px; flex-wrap: wrap; }
+.filter-chip {
+  padding: 3px 14px;
+  font-size: 13px;
+  line-height: 1.4;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.18);
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+}
+.filter-chip.active {
+  color: #fff;
+  border-color: var(--accent);
+  background: rgba(233,69,96,0.25);
+}
+
+.price-input {
+  width: 74px;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px;
+}
+.price-input::placeholder { color: #777; }
+.price-sep { color: var(--text-secondary); font-size: 12px; }
+
+/* 五行配色（中文类名，与元素取值一致；chip 与用神标签共用） */
+.element-木 { color: var(--wood); }
+.element-火 { color: var(--fire); }
+.element-土 { color: var(--earth); }
+.element-金 { color: var(--metal); }
+.element-水 { color: var(--water); }
+
+.bg-木 { background: rgba(76,175,80,0.15); border-color: var(--wood); color: var(--wood); }
+.bg-火 { background: rgba(244,67,54,0.15); border-color: var(--fire); color: var(--fire); }
+.bg-土 { background: rgba(255,152,0,0.15); border-color: var(--earth); color: var(--earth); }
+.bg-金 { background: rgba(189,189,189,0.15); border-color: var(--metal); color: var(--metal); }
+.bg-水 { background: rgba(33,150,243,0.15); border-color: var(--water); color: var(--water); }
+
+.filter-chip.bg-木.active { background: rgba(76,175,80,0.35); color: #fff; }
+.filter-chip.bg-火.active { background: rgba(244,67,54,0.35); color: #fff; }
+.filter-chip.bg-土.active { background: rgba(255,152,0,0.35); color: #fff; }
+.filter-chip.bg-金.active { background: rgba(189,189,189,0.35); color: #fff; }
+.filter-chip.bg-水.active { background: rgba(33,150,243,0.35); color: #fff; }
+
+/* ── 扫描概况：各周期盘面用神 ── */
+.period-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.period-name { font-weight: bold; color: var(--text-primary); }
+.period-date { color: var(--text-secondary); font-family: monospace; }
+.period-pillars { color: var(--accent-gold); font-family: monospace; margin-right: 4px; }
+
+/* ── 结果行：月/周/日分项评分 + 市场标签 ── */
+.period-scores { display: flex; gap: 6px; margin: 6px 0 2px; flex-wrap: wrap; }
+.period-score {
+  font-size: 11px;
+  font-family: monospace;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.06);
+}
+.period-score em { font-style: normal; margin-right: 3px; opacity: 0.75; }
+.market-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,255,255,0.2);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
 
 .scan-summary {
   margin: 0 12px 12px;

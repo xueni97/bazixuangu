@@ -249,6 +249,79 @@ export class YuanhaiDecisionModel {
     return { score, level, reason: reasons.join("；") };
   }
 
+  // ── 多周期叠加综合评分（与 Python 端 composite_score 严格一致） ──
+  // 长期趋势权重高、短期日内权重低；实际使用按勾选项归一化
+  static PERIOD_WEIGHTS = { monthly: 0.5, weekly: 0.3, daily: 0.2 };
+  static PERIOD_LABELS = { monthly: "月", weekly: "周", daily: "日" };
+
+  static _scoreLevel(score) {
+    if (score >= 45) return "强烈推荐";
+    if (score >= 15) return "推荐";
+    if (score >= -10) return "中性";
+    if (score >= -35) return "谨慎";
+    return "回避";
+  }
+
+  /** 各周期代表时点：日=当时，周=本周一（保持时辰），月=当月1号0点。 */
+  static _periodDatetime(dt, period) {
+    if (period === "daily") return dt;
+    if (period === "weekly") return getMonday(dt);
+    if (period === "monthly") return new Date(dt.getFullYear(), dt.getMonth(), 1);
+    throw new Error(`未知周期: ${period}`);
+  }
+
+  /** 日/周/月三个代表时点的四柱与用神分析（扫描时只算一次）。 */
+  static periodAnalyses(dt) {
+    const out = {};
+    for (const key of ["monthly", "weekly", "daily"]) {
+      const pdt = YuanhaiDecisionModel._periodDatetime(dt, key);
+      const pillars = BaziEngine.from_datetime(pdt);
+      out[key] = { date: formatDate(pdt), pillars, analysis: YuanhaiDecisionModel.analyze(pillars) };
+    }
+    return out;
+  }
+
+  /**
+   * 多周期加权综合评分 + 同向共振加成（封顶 ±15）。
+   * @param {string} stockElement 股票五行
+   * @param {object} periodData periodAnalyses() 返回值
+   * @param {string[]} selected 勾选周期
+   * @param {string} stockName 股票名称（字符级匹配）
+   * @returns {{score:number, level:string, reason:string, periodScores:object}}
+   */
+  static compositeScore(stockElement, periodData, selected, stockName = null) {
+    const weights = YuanhaiDecisionModel.PERIOD_WEIGHTS;
+    const chosen = ["monthly", "weekly", "daily"].filter((p) => selected.includes(p));
+    const list = chosen.length ? chosen : ["daily"];
+    const totalW = list.reduce((s, p) => s + weights[p], 0);
+
+    const periodScores = {};
+    let weighted = 0;
+    for (const p of list) {
+      const info = YuanhaiDecisionModel.stock_score(stockElement, periodData[p].analysis, stockName);
+      periodScores[p] = info;
+      weighted += (weights[p] * info.score) / totalW;
+    }
+
+    let score = weighted;
+    const raws = list.map((p) => periodScores[p].score);
+    let resonance = "";
+    if (list.length > 1) {
+      const label = list.map((p) => YuanhaiDecisionModel.PERIOD_LABELS[p]).join("");
+      if (Math.min(...raws) >= 45) { score += 15; resonance = `${label}周期强烈共振`; }
+      else if (Math.min(...raws) >= 15) { score += 8; resonance = `${label}周期共振看多`; }
+      else if (Math.max(...raws) <= -35) { score -= 15; resonance = `${label}周期共振回避`; }
+      else if (Math.max(...raws) <= -15) { score -= 8; resonance = `${label}周期共振走弱`; }
+    }
+
+    score = Math.max(-100, Math.min(100, Math.round(score)));
+    // 综合理由：共振结论 + 权重最高周期的分项理由
+    const anchor = list.reduce((a, b) => (weights[b] > weights[a] ? b : a));
+    const reason = [resonance, periodScores[anchor].reason].filter(Boolean).join("；");
+
+    return { score, level: YuanhaiDecisionModel._scoreLevel(score), reason, periodScores };
+  }
+
   static daily_direction(dt) {
     const pillars = BaziEngine.from_datetime(dt);
     const analysis = YuanhaiDecisionModel.analyze(pillars);

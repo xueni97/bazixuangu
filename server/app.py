@@ -23,7 +23,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from sequoia_x.strategy.metaphysics import (  # noqa: E402
-    BaziEngine,
     StockElementAnalyzer,
     YuanhaiDecisionModel,
 )
@@ -139,9 +138,15 @@ def search():
 
 @api.route("/scan")
 def scan():
-    """全市场命理扫描，按用神评分排序。
+    """全市场命理扫描，按多周期综合评分排序。
 
-    参数: year/month/day/hour（默认当前）、min_score（默认10）、limit（默认100）
+    参数:
+      year/month/day/hour（默认当前）
+      periods: 逗号分隔，可选 monthly,weekly,daily（默认 daily）
+      elements: 逗号分隔五行筛选（木火土金水，空=全部）
+      markets: 逗号分隔市场筛选（沪,深,北交所，空=全部）
+      min_price/max_price: 价格区间（仅快照有价格时生效）
+      min_score（默认10）、limit（默认100）
     """
     if not DB_PATH.exists():
         return _json_err("数据库不存在", 404)
@@ -154,9 +159,49 @@ def scan():
     min_score = int(request.args.get("min_score", 10))
     limit = int(request.args.get("limit", 100))
 
+    # 周期勾选（保持月→周→日顺序）
+    raw_periods = request.args.get("periods", "daily")
+    selected = [p for p in ("monthly", "weekly", "daily")
+                if p in raw_periods.split(",")] or ["daily"]
+
+    # 属性/市场/价格筛选
+    elem_filter = {e for e in request.args.get("elements", "").split(",") if e}
+    valid_elems = {"木", "火", "土", "金", "水"}
+    elem_filter &= valid_elems
+    market_filter = {m for m in request.args.get("markets", "").split(",") if m}
+
+    def _opt_float(name):
+        v = request.args.get(name)
+        try:
+            return float(v) if v not in (None, "") else None
+        except ValueError:
+            return None
+
+    min_price = _opt_float("min_price")
+    max_price = _opt_float("max_price")
+
     dt = datetime(year, month, day, hour)
-    pillars = BaziEngine.from_datetime(dt)
-    analysis = YuanhaiDecisionModel.analyze(pillars)
+    period_data = YuanhaiDecisionModel.period_analyses(dt)
+    daily_analysis = period_data["daily"]["analysis"]
+
+    # 各周期元信息（日期/四柱/用神/权重）
+    period_meta = []
+    for p in ("monthly", "weekly", "daily"):
+        if p not in selected:
+            continue
+        pd = period_data[p]
+        an = pd["analysis"]
+        period_meta.append({
+            "key": p,
+            "label": YuanhaiDecisionModel.PERIOD_LABELS[p],
+            "weight": YuanhaiDecisionModel.PERIOD_WEIGHTS[p],
+            "date": pd["date"],
+            "pillars": str(pd["pillars"]),
+            "dayMaster": an.day_master,
+            "dayMasterStrength": an.day_master_strength,
+            "useGods": an.use_gods,
+            "avoidGods": an.avoid_gods,
+        })
 
     conn = get_conn()
     try:
@@ -168,35 +213,57 @@ def scan():
     results = []
     for row in rows:
         symbol, name = row[0], row[1] or row[0]
+        price, change_pct, market = row[2], row[3], row[4]
+
+        # ── 硬过滤：市场 / 价格 ──
+        if market_filter and market not in market_filter:
+            continue
+        if price is not None:
+            if min_price is not None and price < min_price:
+                continue
+            if max_price is not None and price > max_price:
+                continue
+
         elem = StockElementAnalyzer.combined_element(name)
         if elem is None:
             continue
-        info = YuanhaiDecisionModel.stock_score(elem, analysis, stock_name=name)
-        if info["score"] >= min_score:
-            results.append({
-                "symbol": symbol,
-                "name": name,
-                "element": elem,
-                "score": info["score"],
-                "level": info["level"],
-                "reason": info["reason"],
-                "price": row[2],
-                "changePct": row[3],
-                "market": row[4],
-            })
+        if elem_filter and elem not in elem_filter:
+            continue
+
+        info = YuanhaiDecisionModel.composite_score(
+            elem, period_data, selected, stock_name=name)
+        if info["score"] < min_score:
+            continue
+
+        results.append({
+            "symbol": symbol,
+            "name": name,
+            "element": elem,
+            "score": info["score"],
+            "level": info["level"],
+            "reason": info["reason"],
+            "periodScores": {
+                k: {"score": v["score"], "level": v["level"]}
+                for k, v in info["periodScores"].items()
+            },
+            "price": price,
+            "changePct": change_pct,
+            "market": market,
+        })
 
     results.sort(key=lambda x: x["score"], reverse=True)
     results = results[:limit]
 
     return jsonify({
         "date": dt.strftime("%Y-%m-%d %H:%M"),
-        "pillars": str(pillars),
-        "dayMaster": analysis.day_master,
-        "dayMasterElement": analysis.day_master_element,
-        "dayMasterStrength": analysis.day_master_strength,
-        "useGods": analysis.use_gods,
-        "avoidGods": analysis.avoid_gods,
-        "toneGod": analysis.tone_god,
+        "pillars": str(period_data["daily"]["pillars"]),
+        "dayMaster": daily_analysis.day_master,
+        "dayMasterElement": daily_analysis.day_master_element,
+        "dayMasterStrength": daily_analysis.day_master_strength,
+        "useGods": daily_analysis.use_gods,
+        "avoidGods": daily_analysis.avoid_gods,
+        "toneGod": daily_analysis.tone_god,
+        "periods": period_meta,
         "dataSource": source,
         "totalScanned": len(rows),
         "totalMatched": len(results),

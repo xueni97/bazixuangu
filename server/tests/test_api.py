@@ -252,6 +252,80 @@ def test_sectors_counts_all(client):
     assert sum(body.values()) == 5  # 全 universe 计数
 
 
+def test_scan_multi_period_meta_and_scores(client):
+    """勾选月/周/日：返回三个周期元信息，每只股票带分项分，综合分在[-100,100]。"""
+    resp = client.get("/api/scan?min_score=-100&limit=10&periods=monthly,weekly,daily")
+    body = resp.get_json()
+    keys = [p["key"] for p in body["periods"]]
+    assert keys == ["monthly", "weekly", "daily"]
+    weights = [p["weight"] for p in body["periods"]]
+    assert weights == [0.5, 0.3, 0.2]
+    for r in body["results"]:
+        assert set(r["periodScores"].keys()) == {"monthly", "weekly", "daily"}
+        assert -100 <= r["score"] <= 100
+
+
+def test_scan_period_default_and_subset(client):
+    """默认仅日周期；周+日子集不包含月。"""
+    body = client.get("/api/scan?min_score=-100").get_json()
+    assert [p["key"] for p in body["periods"]] == ["daily"]
+    body2 = client.get("/api/scan?min_score=-100&periods=weekly,daily,xxx").get_json()
+    assert [p["key"] for p in body2["periods"]] == ["weekly", "daily"]
+
+
+def test_scan_element_filter(client):
+    """五行筛选：命中结果的属性必须全部属于勾选集合。"""
+    resp = client.get("/api/scan?min_score=-100&periods=monthly,weekly,daily&elements=火,水")
+    body = resp.get_json()
+    assert body["results"], "当前盘面下火/水至少应有命中（阈值-100）"
+    assert all(r["element"] in {"火", "水"} for r in body["results"])
+
+
+def test_scan_market_and_price_filter(client, temp_db):
+    """市场与价格区间硬过滤。"""
+    conn = sqlite3.connect(str(temp_db))
+    conn.executemany(
+        "INSERT INTO stock_spot VALUES (?, ?, ?, ?, ?, ?)",
+        [("600519", "贵州茅台", 1500.0, 2.5, "沪", "2026-09-14"),
+         ("000001", "平安银行", 12.0, -1.0, "深", "2026-09-14"),
+         ("832000", "测试北交", 5.0, 0.0, "北交所", "2026-09-14")],
+    )
+    conn.commit()
+    conn.close()
+
+    body = client.get("/api/scan?min_score=-100&markets=沪").get_json()
+    assert {r["symbol"] for r in body["results"]} <= {"600519"}
+
+    body = client.get("/api/scan?min_score=-100&markets=深,北交所").get_json()
+    assert {r["symbol"] for r in body["results"]} <= {"000001", "832000"}
+
+    body = client.get("/api/scan?min_score=-100&min_price=10&max_price=100").get_json()
+    assert {r["symbol"] for r in body["results"]} <= {"000001"}
+
+    body = client.get("/api/scan?min_score=-100&min_price=1000").get_json()
+    assert {r["symbol"] for r in body["results"]} <= {"600519"}
+
+
+def test_composite_score_weighted_and_resonance():
+    """综合评分 = 归一化加权 + 同向共振封顶；单周期退化为原日评分。"""
+    from datetime import datetime
+    from sequoia_x.strategy.metaphysics import YuanhaiDecisionModel
+
+    pd = YuanhaiDecisionModel.period_analyses(datetime(2026, 9, 14, 10))
+    daily_only = YuanhaiDecisionModel.composite_score("火", pd, ["daily"], stock_name="测试")
+    daily_raw = YuanhaiDecisionModel.stock_score(
+        "火", pd["daily"]["analysis"], stock_name="测试")
+    assert daily_only["score"] == daily_raw["score"]
+    assert "periodScores" in daily_only
+
+    full = YuanhaiDecisionModel.composite_score(
+        "火", pd, ["monthly", "weekly", "daily"], stock_name="测试")
+    raws = [v["score"] for v in full["periodScores"].values()]
+    weighted = round(0.5 * raws[0] + 0.3 * raws[1] + 0.2 * raws[2])
+    expected = min(100, weighted + (15 if min(raws) >= 45 else 8 if min(raws) >= 15 else 0))
+    assert full["score"] == expected
+
+
 def test_sync_endpoints(client, monkeypatch):
     monkeypatch.setattr("data_sync.sync_spot_async", lambda: {"ok": True, "message": "已启动后台同步"})
     resp = client.post("/api/sync")
