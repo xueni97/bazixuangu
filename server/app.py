@@ -265,6 +265,9 @@ def not_found(_e):
 
 
 if __name__ == "__main__":
+    import threading
+    import webbrowser
+
     if not DB_PATH.exists():
         print(f"[!] 数据库不存在: {DB_PATH}")
     else:
@@ -281,5 +284,8 @@ if __name__ == "__main__":
         print(f"[i] 手机联用: http://{lan_ip}:5175 （需同一WiFi，在APP设置中填入）")
     except OSError:
         pass
+
+    # 延迟2秒自动打开浏览器（等待 Flask 起来）
+    threading.Timer(2, lambda: webbrowser.open("http://127.0.0.1:5175")).start()
 
     app.run(host="0.0.0.0", port=5175, debug=False)

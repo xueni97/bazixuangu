@@ -1,17 +1,25 @@
 @echo off
-chcp 65001 >nul
-title 八字选股服务
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
+title Bazi Stock Service
 cd /d %~dp0
 
-if exist "..\.venv\Scripts\python.exe" (
-  set PYTHON=..\.venv\Scripts\python.exe
-) else (
-  set PYTHON=python
+set "PYTHON=..\.venv\Scripts\python.exe"
+if not exist "%PYTHON%" set "PYTHON=python"
+
+REM Clean up stale process on port 5175
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5175.*LISTENING"') do (
+  echo [!] Port 5175 in use by PID %%a, killing...
+  taskkill /pid %%a /f >nul 2>&1
+  timeout /t 1 /nobreak >nul
 )
 
-echo [i] 启动八字选股服务...
-start "八字选股服务" %PYTHON% server\app.py
-timeout /t 2 /nobreak >nul
-start "" http://127.0.0.1:5175
-echo [i] 服务已在独立窗口运行，浏览器已打开。关闭该服务窗口即可停止。
-pause
+echo [i] Starting Bazi Stock Service...
+echo [i] Browser will open automatically.
+echo [i] Close this window to stop the service.
+echo.
+"%PYTHON%" server\app.py
+
+echo.
+echo [!] Service stopped. Press any key to close.
+pause >nul
