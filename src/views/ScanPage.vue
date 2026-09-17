@@ -150,6 +150,12 @@
             </select>
             <span class="filter-hint">距离均线在此范围内，且前20日/周曾站上均线</span>
           </div>
+          <div class="filter-row">
+            <span class="filter-label">勾选阈值</span>
+            <van-stepper v-model="autoThreshold" :min="0" :max="100" :step="5" integer
+              button-size="26" class="threshold-stepper" @change="persistThreshold" />
+            <span class="filter-hint">综合分 ≥ 此值可一键选中（当前结果集内）</span>
+          </div>
         </div>
 
         <div v-if="scanResult" class="scan-summary">
@@ -200,7 +206,10 @@
               <div class="stock-main">
                 <span class="code">{{ s.symbol }}</span>
                 <span class="name">{{ s.name }}</span>
-                <span v-if="s.element" class="elem" :class="'element-' + s.element">{{ s.element }}</span>
+                <span v-if="s.element" class="elem" :class="'element-' + s.element" :title="s.stemNature">
+                  {{ s.stemLabel || s.element }}
+                </span>
+                <span v-if="s.godLabel" class="god-tag-mini">{{ s.godLabel }}</span>
                 <span v-if="s.market" class="market-tag">{{ s.market }}</span>
               </div>
               <div class="stock-score">
@@ -231,15 +240,24 @@
         </div>
 
         <div v-if="scanResults.length" class="scan-results">
-          <div class="section-title">命理评分排行</div>
-          <div v-for="s in scanResults" :key="s.symbol" class="stock-row">
-            <div class="stock-top">
-              <div class="stock-main">
-                <span class="code">{{ s.symbol }}</span>
-                <span class="name">{{ s.name }}</span>
-                <span class="elem" :class="'element-' + s.element">{{ s.element }}</span>
-                <span v-if="s.market" class="market-tag">{{ s.market }}</span>
-              </div>
+          <div class="section-title">
+            命理评分排行
+            <span class="title-hint">勾选后加入自选，次日收盘自动算胜率</span>
+          </div>
+          <van-checkbox-group v-model="checkedSymbols" @update:model-value="onPickChange">
+            <div v-for="s in scanResults" :key="s.symbol" class="stock-row scan-pick-row">
+              <van-checkbox :name="s.symbol" shape="square" icon-size="18" class="row-check" />
+              <div class="row-body">
+              <div class="stock-top">
+                <div class="stock-main">
+                  <span class="code">{{ s.symbol }}</span>
+                  <span class="name">{{ s.name }}</span>
+                  <span class="elem" :class="'element-' + s.element" :title="s.stemNature">
+                    {{ s.stemLabel || s.element }}
+                  </span>
+                  <span v-if="s.godLabel" class="god-tag-mini">{{ s.godLabel }}</span>
+                  <span v-if="s.market" class="market-tag">{{ s.market }}</span>
+                </div>
               <div class="stock-score">
                 <div class="score-num" :class="scoreClass(s.score)">{{ s.score > 0 ? '+' : '' }}{{ s.score }}</div>
                 <div class="score-level">{{ s.level }}</div>
@@ -284,7 +302,21 @@
                 </span>
               </span>
             </div>
-          </div>
+              </div><!-- /row-body -->
+            </div>
+          </van-checkbox-group>
+        </div>
+
+        <div class="pick-bar" v-if="scanResults.length">
+          <span class="pick-count">已选 {{ checkedSymbols.length }} 只</span>
+          <van-button size="small" plain @click="clearPick">清空</van-button>
+          <van-button size="small" plain type="primary" @click="autoPick">
+            全选≥{{ autoThreshold }}分
+          </van-button>
+          <van-button size="small" type="primary" :disabled="!checkedSymbols.length"
+            :loading="adding" @click="onAddWatch">
+            加入自选
+          </van-button>
         </div>
 
         <div v-if="loading" class="loading">
@@ -328,6 +360,7 @@ import { showToast } from 'vant'
 import {
   scanStocks, searchStocks, getSectors, getSyncStatus, triggerSync, triggerMaSync,
 } from '../api'
+import { addWatchlist } from '../lib/watchlist.js'
 
 const keyword = ref('')
 const loading = ref(false)
@@ -353,6 +386,21 @@ const maTol = ref(0.03)
 // 错误页一键更新入口：maSyncPeriod='day'|'week'|null，spotNeeded=快照缺失
 const maSyncPeriod = ref(null)
 const spotNeeded = ref(false)
+
+// ── 自选勾选：一键阈值（localStorage 持久化，默认80）+ 选中集合 ──
+const autoThreshold = ref((() => {
+  const v = parseInt(localStorage.getItem('wl_auto_threshold'), 10)
+  return Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 80
+})())
+const checkedSymbols = ref([])
+const autoPickedSet = ref(new Set())
+const adding = ref(false)
+
+function persistThreshold(v) {
+  const n = Math.min(100, Math.max(0, parseInt(v, 10) || 0))
+  autoThreshold.value = n
+  localStorage.setItem('wl_auto_threshold', String(n))
+}
 
 function toggleElement(e) {
   const i = selectedElements.value.indexOf(e)
@@ -498,6 +546,112 @@ async function loadSectors() {
   } catch { /* 忽略：分布图非核心功能 */ }
 }
 
+// ── 入池勾选 ─────────────────────────────────────────────
+// 勾选集合变化：用户取消勾选的票从一键集合移除
+function onPickChange(names) {
+  const cur = new Set(names)
+  for (const sym of [...autoPickedSet.value]) {
+    if (!cur.has(sym)) autoPickedSet.value.delete(sym)
+  }
+}
+
+function clearPick() {
+  checkedSymbols.value = []
+  autoPickedSet.value.clear()
+}
+
+// 一键勾选：只在当前已过全部筛选的结果集内，按综合分阈值
+function autoPick() {
+  const t = autoThreshold.value
+  const hit = scanResults.value.filter((s) => (s.score ?? -1e9) >= t)
+  checkedSymbols.value = hit.map((s) => s.symbol)
+  autoPickedSet.value = new Set(hit.map((s) => s.symbol))
+  if (!hit.length) {
+    showToast(`当前结果集内没有综合分 ≥ ${t} 的票`)
+    return
+  }
+  showToast(`已按当前条件选中${hit.length}只（≥${t}分）`)
+}
+
+// 入池时记录的筛选快照（label 用于条件分组战绩）
+function filterSnapshot(pickedBy) {
+  const parts = [periods.value.map((k) => PERIOD_LABEL[k]).join('')]
+  if (selectedElements.value.length) parts.push(selectedElements.value.join(''))
+  if (selectedMarkets.value.length) {
+    parts.push('市场' + selectedMarkets.value.map((m) => (m === '北交所' ? '北' : m)).join(''))
+  }
+  if (minPrice.value !== '' || maxPrice.value !== '') {
+    parts.push(`价${minPrice.value || '0'}~${maxPrice.value || '∞'}`)
+  }
+  for (const w of selectedMa.value) parts.push(`日${w}`)
+  for (const w of selectedMaWeek.value) parts.push(`周${w}`)
+  const baseLabel = parts.join('·')
+  return {
+    label: pickedBy === 'auto' ? `${baseLabel}·自动≥${autoThreshold.value}` : baseLabel,
+    filters: {
+      elements: [...selectedElements.value],
+      markets: [...selectedMarkets.value],
+      minPrice: minPrice.value !== '' ? Number(minPrice.value) : null,
+      maxPrice: maxPrice.value !== '' ? Number(maxPrice.value) : null,
+      ma: [...selectedMa.value],
+      maw: [...selectedMaWeek.value],
+      maTol: maTol.value,
+      periods: [...periods.value],
+      pickedBy,
+      threshold: pickedBy === 'auto' ? autoThreshold.value : null,
+    },
+  }
+}
+
+async function onAddWatch() {
+  if (!checkedSymbols.value.length) return
+  if (!scanResult.value) {
+    showToast('扫描结果已失效，请重新扫描')
+    return
+  }
+  const sel = new Set(checkedSymbols.value)
+  const picked = scanResults.value.filter((s) => sel.has(s.symbol))
+  if (!picked.length) {
+    showToast('勾选的票不在当前结果集内，请重新扫描')
+    return
+  }
+  const periodPillars = (scanResult.value.periods || []).map((p) => ({
+    key: p.key, label: p.label, date: p.date, pillars: p.pillars,
+  }))
+  const common = {
+    periods: [...periods.value],
+    pillars: scanResult.value.pillars || '',
+    periodPillars,
+  }
+  const autoItems = picked.filter((s) => autoPickedSet.value.has(s.symbol)).map((s) => ({ ...s, source: 'auto' }))
+  const manualItems = picked.filter((s) => !autoPickedSet.value.has(s.symbol)).map((s) => ({ ...s, source: 'manual' }))
+  adding.value = true
+  try {
+    const calls = []
+    if (autoItems.length) {
+      const snap = filterSnapshot('auto')
+      calls.push(addWatchlist(autoItems, { ...common, source: 'auto', filtersLabel: snap.label, filters: snap.filters }))
+    }
+    if (manualItems.length) {
+      const snap = filterSnapshot('manual')
+      calls.push(addWatchlist(manualItems, { ...common, source: 'manual', filtersLabel: snap.label, filters: snap.filters }))
+    }
+    const rs = await Promise.all(calls)
+    const added = rs.reduce((n, r) => n + r.added, 0)
+    const dup = rs.reduce((a, r) => a.concat(r.duplicated), [])
+    if (added > 0) {
+      showToast(`已加入自选 ${added} 只，明日收盘自动结算${dup.length ? `（${dup.length}只已在池中）` : ''}`)
+      clearPick()
+    } else {
+      showToast(`勾选的票都已在自选池中（${dup.slice(0, 3).join('、')}${dup.length > 3 ? '等' : ''}）`)
+    }
+  } catch (e) {
+    showToast('加入自选失败：' + (e.message || '本地数据异常'))
+  } finally {
+    adding.value = false
+  }
+}
+
 async function onScan() {
   if (!periods.value.length) {
     showToast('请至少勾选一个周期效应')
@@ -512,6 +666,7 @@ async function onScan() {
     scanResult.value = data
     scanResults.value = data.results || []
     searchResults.value = []
+    clearPick()
     if (!syncing.value) loadSectors()
   } catch (e) {
     scanResults.value = []
@@ -539,6 +694,7 @@ async function onSearch() {
     // searchStocks 已内置本地评分（按勾选周期）
     searchResults.value = await searchStocks(keyword.value.trim(), periods.value)
     scanResults.value = []
+    clearPick()
   } catch (e) {
     errorMsg.value = '搜索失败：' + (e.message || '本地数据未就绪')
   } finally {
@@ -841,4 +997,24 @@ onUnmounted(() => stopSyncPolling())
 .tips-card .tip-text { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
 
 .settings-tip { font-size: 12px; color: var(--text-secondary); margin-top: 8px; line-height: 1.5; }
+
+/* ── 勾选入池 ── */
+.title-hint { font-size: 11px; font-weight: normal; color: var(--text-secondary); margin-left: 8px; }
+.threshold-stepper { margin: 0 4px; flex-shrink: 0; }
+.stock-row.scan-pick-row { display: flex; align-items: flex-start; gap: 10px; }
+.row-check { padding-top: 2px; flex-shrink: 0; }
+.row-body { flex: 1; min-width: 0; }
+.god-tag-mini {
+  font-size: 11px; padding: 1px 6px; border-radius: 3px; flex-shrink: 0;
+  color: #d8b56a; border: 1px solid rgba(216,181,106,0.4);
+}
+.pick-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 100;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  background: var(--bg-card);
+  border-top: 1px solid rgba(255,255,255,0.1);
+}
+.pick-count { font-size: 13px; font-weight: bold; margin-right: auto; }
+.scan-layout { padding-bottom: 70px; }
 </style>

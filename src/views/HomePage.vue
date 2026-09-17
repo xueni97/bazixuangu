@@ -47,6 +47,7 @@
       <van-grid-item icon="underway-o" text="月方向" to="/monthly" />
       <van-grid-item icon="exchange" text="买点信号" to="/buy-point" />
       <van-grid-item icon="search" text="股票扫描" to="/scan" />
+      <van-grid-item icon="star-o" text="自选观察" to="/watchlist" />
     </van-grid>
 
     <div class="quick-report" v-if="todayReport">

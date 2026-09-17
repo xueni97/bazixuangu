@@ -31,6 +31,11 @@ const routes = [
     name: 'scan',
     component: () => import('../views/ScanPage.vue'),
   },
+  {
+    path: '/watchlist',
+    name: 'watchlist',
+    component: () => import('../views/WatchlistPage.vue'),
+  },
 ]
 
 const router = createRouter({

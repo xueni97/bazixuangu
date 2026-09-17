@@ -17,7 +17,7 @@ import {
   syncSpotAsync, syncMaAsync, getSyncState, loadMeta,
 } from '../lib/market/maSync.js'
 import { nearMa, classifyMarket } from '../lib/market/ma.js'
-import { StockElementAnalyzer } from '../lib/metaphysics/stockElement.js'
+import { StockImageryAnalyzer } from '../lib/metaphysics/imagery.js'
 import { YuanhaiDecisionModel } from '../lib/metaphysics/model.js'
 
 const PERIOD_LABELS = { monthly: '月', weekly: '周', daily: '日' }
@@ -99,6 +99,8 @@ export async function scanStocks(params = {}) {
       dayMasterStrength: an.dayMasterStrength,
       useGods: an.useGods,
       avoidGods: an.avoidGods,
+      useStems: an.useStems,
+      toneStem: an.toneStem,
     })
   }
 
@@ -146,9 +148,10 @@ export async function scanStocks(params = {}) {
       if (maxPrice != null && price > maxPrice) continue
     }
 
-    // 五行属性
-    const elem = StockElementAnalyzer.combinedElement(name)
-    if (!elem) continue
+    // 十干/十神取象（主五行取主象天干的五行）
+    const img = StockImageryAnalyzer.analyze(name)
+    if (!img) continue
+    const elem = img.element
     if (elemFilter.size && !elemFilter.has(elem)) continue
 
     // 硬过滤：回踩 144/288 日均线附近（日线）
@@ -188,12 +191,18 @@ export async function scanStocks(params = {}) {
       if (!wHit) continue
     }
 
-    // 综合评分
-    const info = YuanhaiDecisionModel.compositeScore(elem, periodData, selected, name)
+    // 综合评分（十干 + 十神双层取象）
+    const info = YuanhaiDecisionModel.compositeScore(img, periodData, selected, name)
     if (info.score < minScore) continue
 
     const item = {
       symbol, name, element: elem,
+      stem: img.primaryStem,
+      stemLabel: img.stemLabel,
+      stemNature: img.stemNature,
+      secondaryStems: img.secondaryStems,
+      godNames: img.godNames,
+      godLabel: img.godLabel,
       score: info.score, level: info.level, reason: info.reason,
       periodScores: Object.fromEntries(
         Object.entries(info.periodScores).map(([k, v]) => [k, { score: v.score, level: v.level }]),
@@ -244,6 +253,7 @@ export async function scanStocks(params = {}) {
     useGods: dailyAnalysis.useGods,
     avoidGods: dailyAnalysis.avoidGods,
     toneGod: dailyAnalysis.toneGod,
+    toneStem: dailyAnalysis.toneStem,
     periods: periodMeta,
     maFilter: maWindows,
     maWeekFilter: maWeekWindows,
@@ -275,16 +285,21 @@ export async function searchStocks(keyword, periods = ['monthly', 'weekly', 'dai
 
   const periodData = YuanhaiDecisionModel.periodAnalyses(new Date())
   return matched.map((s) => {
-    const elem = StockElementAnalyzer.combinedElement(s.name)
-    const info = YuanhaiDecisionModel.compositeScore(elem, periodData, periods, s.name)
+    const img = StockImageryAnalyzer.analyze(s.name)
+    const elem = img ? img.element : undefined
+    const info = YuanhaiDecisionModel.compositeScore(img, periodData, periods, s.name)
     return {
       symbol: s.symbol, name: s.name,
       price: s.price ?? null, changePct: s.changePct ?? null,
       market: s.market || classifyMarket(s.symbol),
-      element: elem, score: info.score, level: info.level,
+      element: elem,
+      stem: img ? img.primaryStem : undefined,
+      stemLabel: img ? img.stemLabel : null,
+      godLabel: img ? img.godLabel : null,
+      score: info.score, level: info.level,
       reason: info.reason, periodScores: info.periodScores,
     }
-  })
+  }).filter((r) => r.element)
 }
 
 /** 获取五行分布统计（全 universe 按五行分组计数，按日缓存）。 */
@@ -296,7 +311,7 @@ export async function getSectors() {
   const rows = await db.getAll('spot')
   const counts = { 木: 0, 火: 0, 土: 0, 金: 0, 水: 0, 未知: 0 }
   for (const r of rows) {
-    const elem = StockElementAnalyzer.combinedElement(r.name || r.symbol)
+    const elem = StockImageryAnalyzer.combinedElement(r.name || r.symbol)
     counts[elem || '未知'] += 1
   }
   _sectorsCache = { date: today, data: counts }
