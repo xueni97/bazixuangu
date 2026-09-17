@@ -13,8 +13,10 @@
   "dependencies": {
     "@capacitor/android": "^8.5.2",
     "@capacitor/core": "^8.5.2",
+    "@devioarts/capacitor-tcpclient": "^0.2.1",
     "axios": "^1.7.0",
     "dayjs": "^1.11.0",
+    "pako": "^3.0.2",
     "vant": "^4.9.0",
     "vue": "^3.4.0",
     "vue-router": "^4.3.0"

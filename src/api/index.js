@@ -38,7 +38,9 @@ export async function getStockNames() {
 
 /**
  * 全市场命理扫描，按多周期综合评分排序。
- * 参数键名与原后端 snake_case 对齐（periods/elements/markets/min_price/max_price/ma/ma_tol/min_score/limit）。
+ * 参数键名与原后端 snake_case 对齐
+ * （periods/elements/markets/min_price/max_price/ma/maw/ma_tol/min_score/limit）。
+ * ma=日线均线窗口（144/288），maw=周线均线窗口（144/288），互不依赖可同时勾选。
  */
 export async function scanStocks(params = {}) {
   const p = params || {}
@@ -50,12 +52,17 @@ export async function scanStocks(params = {}) {
     (k) => rawPeriods.split(',').includes(k),
   ) || ['daily']
 
-  // 均线附加指标
-  const maWindows = []
-  for (const w of String(p.ma || '').split(',')) {
-    const n = parseInt(w, 10)
-    if ((n === 144 || n === 288) && !maWindows.includes(n)) maWindows.push(n)
+  // 解析均线窗口（日/周独立）
+  const parseWindows = (raw) => {
+    const wins = []
+    for (const w of String(raw || '').split(',')) {
+      const n = parseInt(w, 10)
+      if ((n === 144 || n === 288) && !wins.includes(n)) wins.push(n)
+    }
+    return wins
   }
+  const maWindows = parseWindows(p.ma)        // 日均线
+  const maWeekWindows = parseWindows(p.maw)  // 周均线
   let maTol = parseFloat(p.ma_tol)
   if (Number.isNaN(maTol)) maTol = 0.03
   maTol = Math.min(0.1, Math.max(0.005, maTol))
@@ -101,14 +108,25 @@ export async function scanStocks(params = {}) {
     throw new Error('本地行情快照为空：请先点「更新数据」同步全市场快照')
   }
 
-  // 均线表
+  // 日均线表
   const maRows = await db.getAll('ma')
   const maMap = {}
   for (const r of maRows) maMap[r.symbol] = r
   const maTradeDate = await db.getMeta('ma_trade_date')
   if (maWindows.length && !maTradeDate) {
-    const err = new Error('均线指标尚未同步：请先点「更新均线(144/288)」完成日K同步（首次约3~5分钟）')
+    const err = new Error('日均线指标尚未同步：请先点「更新日均线(144/288)」完成日K同步（首次约3~5分钟）')
     err.code = 'MA_NOT_SYNCED'
+    throw err
+  }
+
+  // 周均线表
+  const maWeekRows = await db.getAll('maWeek')
+  const maWeekMap = {}
+  for (const r of maWeekRows) maWeekMap[r.symbol] = r
+  const maWeekTradeDate = await db.getMeta('ma_week_trade_date')
+  if (maWeekWindows.length && !maWeekTradeDate) {
+    const err = new Error('周均线指标尚未同步：请先点「更新周均线(144/288)」完成周K同步（首次约10分钟）')
+    err.code = 'MA_WEEK_NOT_SYNCED'
     throw err
   }
 
@@ -133,7 +151,7 @@ export async function scanStocks(params = {}) {
     if (!elem) continue
     if (elemFilter.size && !elemFilter.has(elem)) continue
 
-    // 硬过滤：回踩 144/288 日均线附近
+    // 硬过滤：回踩 144/288 日均线附近（日线）
     const mrow = maMap[symbol]
     let refPrice = price
     let ma144 = null, ma288 = null, high20 = null, kclose = null, maDate = null
@@ -154,6 +172,20 @@ export async function scanStocks(params = {}) {
         if (!hit) { maHit = false; break }
       }
       if (!maHit) continue
+    }
+
+    // 硬过滤：回踩 144/288 周均线附近（high20 为最近20个交易周最高收盘）
+    const wrow = maWeekMap[symbol]
+    if (maWeekWindows.length) {
+      if (!wrow) continue
+      const wRef = refPrice != null ? refPrice : wrow.close
+      let wHit = true
+      for (const w of maWeekWindows) {
+        const maVal = w === 144 ? wrow.ma144 : wrow.ma288
+        const [hit] = nearMa(wRef, maVal, wrow.high20, maTol)
+        if (!hit) { wHit = false; break }
+      }
+      if (!wHit) continue
     }
 
     // 综合评分
@@ -182,6 +214,21 @@ export async function scanStocks(params = {}) {
         item.dist288 = d288
       }
     }
+    // 周均线附加信息（有则带，供前端展示距离标签）
+    if (wrow) {
+      const wRef = refPrice != null ? refPrice : wrow.close
+      item.maWeekDate = wrow.tradeDate
+      if (wrow.ma144) {
+        const [, d] = nearMa(wRef, wrow.ma144, wrow.high20, 1.0)
+        item.maWeek144 = wrow.ma144
+        item.distWeek144 = d
+      }
+      if (wrow.ma288) {
+        const [, d] = nearMa(wRef, wrow.ma288, wrow.high20, 1.0)
+        item.maWeek288 = wrow.ma288
+        item.distWeek288 = d
+      }
+    }
     results.push(item)
   }
 
@@ -199,8 +246,10 @@ export async function scanStocks(params = {}) {
     toneGod: dailyAnalysis.toneGod,
     periods: periodMeta,
     maFilter: maWindows,
+    maWeekFilter: maWeekWindows,
     maTol,
     maTradeDate,
+    maWeekTradeDate,
     dataSource: 'spot',
     totalScanned: spotRows.length,
     totalMatched: trimmed.length,
@@ -269,7 +318,7 @@ export async function triggerSync() {
   return syncSpotAsync()
 }
 
-/** 手动触发 144/288 日均线日K同步（force=true 强制重拉当日）。 */
-export async function triggerMaSync(force = false) {
-  return syncMaAsync(force)
+/** 手动触发 144/288 均线K线同步（period='day'日K/'week'周K，force=true 强制全量重拉）。 */
+export async function triggerMaSync(period = 'day', force = false) {
+  return syncMaAsync(period === 'week' ? 'week' : 'day', force)
 }

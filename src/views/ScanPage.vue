@@ -11,10 +11,65 @@
             <van-button type="primary" size="small" @click="onScan" :loading="loading" class="scan-btn">
               全市场扫描
             </van-button>
-            <van-button size="small" plain @click="onSync" :disabled="syncing" class="sync-btn">
-              {{ syncing ? '同步中' : '更新数据' }}
+          </div>
+        </div>
+
+        <!-- 数据管理：快照 / 日均线 / 周均线，三个独立更新入口（手机端同样可见） -->
+        <div class="data-card">
+          <div class="card-title">数据管理</div>
+          <div class="data-row">
+            <div class="data-meta">
+              <span class="data-name">行情快照</span>
+              <span class="data-sub">
+                {{ syncState.lastSuccessDate || '从未同步' }} · {{ syncState.spotCount || 0 }}只
+                <template v-if="syncState.lastSource"> · {{ syncState.lastSource }}</template>
+              </span>
+              <span v-if="syncing" class="data-prog syncing-txt">{{ syncState.spotPhase || '同步中' }}</span>
+              <span v-else-if="syncState.spotStatus === 'failed'" class="data-prog err-txt">上次失败，可重试</span>
+            </div>
+            <van-button size="small" type="primary" plain :loading="syncing" @click="onSync">
+              {{ syncing ? '同步中' : '更新快照' }}
             </van-button>
           </div>
+          <div class="data-row">
+            <div class="data-meta">
+              <span class="data-name">日均线 144/288</span>
+              <span class="data-sub">
+                {{ syncState.maTradeDate || '从未同步' }} · {{ syncState.maCount || 0 }}只
+              </span>
+              <span v-if="maSyncing" class="data-prog syncing-txt">
+                {{ syncState.maPhase || '拉取日K中' }}
+                {{ syncState.maDone != null ? syncState.maDone + '/' + syncState.maTotal : '' }}
+              </span>
+              <span v-else-if="syncState.maStatus === 'failed'" class="data-prog err-txt">
+                {{ syncState.maLastError || '上次失败' }}
+              </span>
+            </div>
+            <van-button size="small" type="warning" plain :loading="maSyncing" @click="onSyncMa('day')">
+              {{ maSyncing ? '同步中' : '更新日均线' }}
+            </van-button>
+          </div>
+          <div class="data-row">
+            <div class="data-meta">
+              <span class="data-name">周均线 144/288</span>
+              <span class="data-sub">
+                {{ syncState.maWeekTradeDate || '从未同步' }} · {{ syncState.maWeekCount || 0 }}只
+              </span>
+              <span v-if="maWeekSyncing" class="data-prog syncing-txt">
+                {{ syncState.maWeekPhase || '拉取周K中' }}
+                {{ syncState.maWeekDone != null ? syncState.maWeekDone + '/' + syncState.maWeekTotal : '' }}
+              </span>
+              <span v-else-if="syncState.maWeekStatus === 'failed'" class="data-prog err-txt">
+                {{ syncState.maWeekLastError || '上次失败' }}
+              </span>
+            </div>
+            <van-button size="small" type="warning" plain :loading="maWeekSyncing" @click="onSyncMa('week')">
+              {{ maWeekSyncing ? '同步中' : '更新周均线' }}
+            </van-button>
+          </div>
+          <p class="settings-tip" style="margin:4px 0 0">
+            APP启动自动后台更新；日线首次约3~5分钟、周线约10分钟（BaoStock直连，超时自动东财/腾讯/新浪兜底）。
+          </p>
         </div>
 
         <!-- 周期叠加 + 属性筛选 -->
@@ -61,7 +116,7 @@
             <span class="filter-hint">元（留空不限）</span>
           </div>
           <div class="filter-row">
-            <span class="filter-label">均线指标</span>
+            <span class="filter-label">日均线</span>
             <div class="chip-group">
               <span
                 class="filter-chip" :class="{ active: selectedMa.includes(144) }"
@@ -72,15 +127,28 @@
                 @click="toggleMa(288)"
               >回踩288日线</span>
             </div>
-            <template v-if="selectedMa.length">
-              <span class="filter-hint">容差</span>
-              <select v-model="maTol" class="tol-select">
-                <option :value="0.01">±1%</option>
-                <option :value="0.03">±3%</option>
-                <option :value="0.05">±5%</option>
-              </select>
-              <span class="filter-hint">且前20日曾站上均线</span>
-            </template>
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">周均线</span>
+            <div class="chip-group">
+              <span
+                class="filter-chip" :class="{ active: selectedMaWeek.includes(144) }"
+                @click="toggleMaWeek(144)"
+              >回踩144周线</span>
+              <span
+                class="filter-chip" :class="{ active: selectedMaWeek.includes(288) }"
+                @click="toggleMaWeek(288)"
+              >回踩288周线</span>
+            </div>
+          </div>
+          <div v-if="selectedMa.length || selectedMaWeek.length" class="filter-row">
+            <span class="filter-label">回踩容差</span>
+            <select v-model="maTol" class="tol-select">
+              <option :value="0.01">±1%</option>
+              <option :value="0.03">±3%</option>
+              <option :value="0.05">±5%</option>
+            </select>
+            <span class="filter-hint">距离均线在此范围内，且前20日/周曾站上均线</span>
           </div>
         </div>
 
@@ -93,8 +161,14 @@
             <van-tag v-if="scanResult.maFilter && scanResult.maFilter.length" plain type="primary">
               回踩{{ scanResult.maFilter.join('/') }}日线 ±{{ Math.round(scanResult.maTol * 100) }}%
             </van-tag>
+            <van-tag v-if="scanResult.maWeekFilter && scanResult.maWeekFilter.length" plain type="warning">
+              回踩{{ scanResult.maWeekFilter.join('/') }}周线 ±{{ Math.round(scanResult.maTol * 100) }}%
+            </van-tag>
             <van-tag v-if="scanResult.maTradeDate" plain type="default">
-              均线 {{ scanResult.maTradeDate }}
+              日均线 {{ scanResult.maTradeDate }}
+            </van-tag>
+            <van-tag v-if="scanResult.maWeekTradeDate" plain type="default">
+              周均线 {{ scanResult.maWeekTradeDate }}
             </van-tag>
           </div>
           <!-- 各勾选周期的盘面用神 -->
@@ -112,10 +186,10 @@
 
         <div v-if="errorMsg" class="error-state">
           <van-empty image="error" :description="errorMsg">
-            <van-button v-if="maSyncNeeded" size="small" type="primary" @click="onSyncMa">
-              立即更新均线数据
+            <van-button v-if="maSyncPeriod" size="small" type="primary" @click="onSyncMa(maSyncPeriod)">
+              立即更新{{ maSyncPeriod === 'week' ? '周均线' : '日均线' }}数据
             </van-button>
-            <van-button size="small" plain @click="onSync">立即更新快照</van-button>
+            <van-button v-if="spotNeeded" size="small" plain @click="onSync">立即更新快照</van-button>
           </van-empty>
         </div>
 
@@ -191,6 +265,16 @@
               </span>
               <span v-if="s.maDate" class="ma-date">日K {{ s.maDate }}</span>
             </div>
+            <!-- 144/288 周均线距离标签（周均线同步后下发） -->
+            <div v-if="s.distWeek144 !== undefined || s.distWeek288 !== undefined" class="ma-tags">
+              <span v-if="s.distWeek144 !== undefined" class="ma-tag" :class="maTagClass(s.distWeek144)">
+                144周线 {{ fmtPct(s.distWeek144) }}
+              </span>
+              <span v-if="s.distWeek288 !== undefined" class="ma-tag" :class="maTagClass(s.distWeek288)">
+                288周线 {{ fmtPct(s.distWeek288) }}
+              </span>
+              <span v-if="s.maWeekDate" class="ma-date">周K {{ s.maWeekDate }}</span>
+            </div>
             <div class="stock-bottom">
               <span class="reason">{{ s.reason }}</span>
               <span v-if="s.price" class="quote-mini">
@@ -229,64 +313,9 @@
           </div>
         </div>
 
-        <div class="side-card">
-          <div class="card-title">数据同步</div>
-          <div class="sync-info">
-            <div class="sync-line">
-              <span class="lbl">状态</span>
-              <span :class="syncing ? 'syncing-txt' : 'ok-txt'">{{ syncStatusText }}</span>
-            </div>
-            <div class="sync-line">
-              <span class="lbl">最近成功</span>
-              <span>{{ syncState.lastSuccessDate || '从未同步' }}</span>
-            </div>
-            <div class="sync-line">
-              <span class="lbl">快照数量</span>
-              <span>{{ syncState.spotCount || 0 }} 只</span>
-            </div>
-            <div class="sync-line" v-if="syncState.phase">
-              <span class="lbl">进度</span>
-              <span>{{ syncState.phase }}</span>
-            </div>
-            <div class="sync-line" v-if="syncState.lastError">
-              <span class="lbl">错误</span>
-              <span class="err-txt">{{ syncState.lastError }}</span>
-            </div>
-            <van-button size="small" type="primary" plain block @click="onSync" :disabled="syncing"
-              style="margin-top: 10px">
-              {{ syncing ? '同步中...' : '立即同步全市场快照' }}
-            </van-button>
-
-            <div class="sync-subtitle">均线指标（144/288 日K）</div>
-            <div class="sync-line">
-              <span class="lbl">交易日</span>
-              <span>{{ syncState.maTradeDate || '从未同步' }}<template
-                v-if="syncState.maTradeDate"> · {{ syncState.maCount || 0 }} 只</template></span>
-            </div>
-            <div class="sync-line" v-if="maSyncing">
-              <span class="lbl">进度</span>
-              <span class="syncing-txt">
-                {{ syncState.maPhase || '拉取日K' }}
-                {{ syncState.maDone != null ? syncState.maDone + '/' + syncState.maTotal : '' }}
-              </span>
-            </div>
-            <div class="sync-line" v-if="syncState.maLastError">
-              <span class="lbl">均线错误</span>
-              <span class="err-txt">{{ syncState.maLastError }}</span>
-            </div>
-            <van-button size="small" type="warning" plain block :loading="maSyncing"
-              @click="onSyncMa" style="margin-top: 6px">
-              {{ maSyncing ? '均线同步中...' : '更新均线(144/288)' }}
-            </van-button>
-            <p class="settings-tip" style="margin: 6px 0 0">
-              全市场日K并发拉取，首次约3~5分钟；每个交易日更新一次即可。
-            </p>
-          </div>
-        </div>
-
         <div class="side-card tips-card">
           <div class="card-title">数据独立</div>
-          <p class="tip-text">APP 启动时自动后台拉取全市场行情与均线数据，无需连接电脑。首次拉取约3~5分钟，之后每交易日增量更新。</p>
+          <p class="tip-text">APP 启动时自动后台拉取全市场行情与日/周均线数据（见左侧「数据管理」），无需连接电脑。行情优先 BaoStock 直连，东财/腾讯/新浪自动兜底。</p>
         </div>
       </div>
     </div>
@@ -294,7 +323,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { showToast } from 'vant'
 import {
   scanStocks, searchStocks, getSectors, getSyncStatus, triggerSync, triggerMaSync,
@@ -317,10 +346,13 @@ const selectedElements = ref([])
 const selectedMarkets = ref([])
 const minPrice = ref('')
 const maxPrice = ref('')
-// 144/288 均线附加指标（空数组=不启用）
+// 144/288 均线附加指标（空数组=不启用）；日/周独立
 const selectedMa = ref([])
+const selectedMaWeek = ref([])
 const maTol = ref(0.03)
-const maSyncNeeded = ref(false)
+// 错误页一键更新入口：maSyncPeriod='day'|'week'|null，spotNeeded=快照缺失
+const maSyncPeriod = ref(null)
+const spotNeeded = ref(false)
 
 function toggleElement(e) {
   const i = selectedElements.value.indexOf(e)
@@ -338,6 +370,12 @@ function toggleMa(w) {
   const i = selectedMa.value.indexOf(w)
   if (i === -1) selectedMa.value.push(w)
   else selectedMa.value.splice(i, 1)
+}
+
+function toggleMaWeek(w) {
+  const i = selectedMaWeek.value.indexOf(w)
+  if (i === -1) selectedMaWeek.value.push(w)
+  else selectedMaWeek.value.splice(i, 1)
 }
 
 // 均线距离展示：带符号百分比；命中容差区间时高亮
@@ -363,24 +401,17 @@ function buildScanParams() {
   if (selectedMarkets.value.length) params.markets = selectedMarkets.value.join(',')
   if (minPrice.value !== '') params.min_price = minPrice.value
   if (maxPrice.value !== '') params.max_price = maxPrice.value
-  if (selectedMa.value.length) {
-    params.ma = selectedMa.value.join(',')
-    params.ma_tol = maTol.value
-  }
+  if (selectedMa.value.length) params.ma = selectedMa.value.join(',')
+  if (selectedMaWeek.value.length) params.maw = selectedMaWeek.value.join(',')
+  if (selectedMa.value.length || selectedMaWeek.value.length) params.ma_tol = maTol.value
   return params
 }
 
 const syncState = ref({})
 const syncing = ref(false)
 const maSyncing = ref(false)
+const maWeekSyncing = ref(false)
 let syncTimer = null
-
-const syncStatusText = computed(() => {
-  if (syncing.value) return '同步中...'
-  if (syncState.value.todaySynced) return '今日快照已最新'
-  if (syncState.value.spotStatus === 'failed') return '上次同步失败'
-  return syncState.value.lastSuccessDate ? '待更新' : '未同步'
-})
 
 function sectorPct(e) {
   if (!sectorCounts.value) return 0
@@ -393,17 +424,23 @@ async function refreshSyncStatus(silent = true) {
     const st = await getSyncStatus()
     const wasSyncing = syncing.value
     const wasMaSyncing = maSyncing.value
+    const wasMaWeekSyncing = maWeekSyncing.value
     syncing.value = st.spotStatus === 'syncing'
     maSyncing.value = st.maStatus === 'syncing'
+    maWeekSyncing.value = st.maWeekStatus === 'syncing'
     syncState.value = st
     // 快照同步从进行中变为结束 → 刷新分布图，并提示
     if (wasSyncing && !syncing.value) {
       loadSectors()
       showToast(st.spotLastError ? '快照同步失败' : '快照同步完成')
     }
-    // 均线同步结束提示
+    // 日均线同步结束提示
     if (wasMaSyncing && !maSyncing.value) {
-      showToast(st.maLastError ? '均线同步失败' : '均线同步完成')
+      showToast(st.maLastError ? '日均线同步失败' : '日均线同步完成')
+    }
+    // 周均线同步结束提示
+    if (wasMaWeekSyncing && !maWeekSyncing.value) {
+      showToast(st.maWeekLastError ? '周均线同步失败' : '周均线同步完成')
     }
   } catch {
     if (!silent) showToast('无法获取同步状态')
@@ -414,7 +451,7 @@ function startSyncPolling() {
   stopSyncPolling()
   syncTimer = setInterval(() => {
     refreshSyncStatus()
-    if (!syncing.value && !maSyncing.value) stopSyncPolling()
+    if (!syncing.value && !maSyncing.value && !maWeekSyncing.value) stopSyncPolling()
   }, 2000)
 }
 
@@ -434,14 +471,16 @@ async function onSync() {
   }
 }
 
-async function onSyncMa() {
+async function onSyncMa(period = 'day') {
+  const isWeek = period === 'week'
   try {
-    // 日常更新走增量（只拉缺失/过期标的）；全量强制重拉由同步服务按交易日自动判断
-    const r = await triggerMaSync(false)
-    showToast(r.message || '均线同步已开始，约3~5分钟')
+    // 日常更新走增量（只拉缺失/过期标的）；全量强制重拉由同步服务按交易日/周自动判断
+    const r = await triggerMaSync(isWeek ? 'week' : 'day', false)
+    showToast(r.message || (isWeek ? '周均线同步已开始，约10分钟' : '日均线同步已开始，约3~5分钟'))
     if (r.skipped) return
-    maSyncing.value = true
-    maSyncNeeded.value = false
+    if (isWeek) maWeekSyncing.value = true
+    else maSyncing.value = true
+    maSyncPeriod.value = null
     startSyncPolling()
   } catch (e) {
     showToast('触发失败：' + (e.message || ''))
@@ -461,7 +500,8 @@ async function onScan() {
   }
   loading.value = true
   errorMsg.value = ''
-  maSyncNeeded.value = false
+  maSyncPeriod.value = null
+  spotNeeded.value = false
   try {
     const data = await scanStocks(buildScanParams())
     scanResult.value = data
@@ -471,9 +511,11 @@ async function onScan() {
   } catch (e) {
     scanResults.value = []
     scanResult.value = null
-    // 本地业务错误（如均线未同步）展示原文，并给出一键同步入口
+    // 本地业务错误展示原文，并给出对应一键同步入口（日/周均线或快照）
     const msg = e.message || ''
-    maSyncNeeded.value = /均线/.test(msg)
+    if (e.code === 'MA_WEEK_NOT_SYNCED' || /周均线/.test(msg)) maSyncPeriod.value = 'week'
+    else if (e.code === 'MA_NOT_SYNCED' || /均线/.test(msg)) maSyncPeriod.value = 'day'
+    spotNeeded.value = /快照|为空/.test(msg)
     errorMsg.value = msg || '扫描失败'
   } finally {
     loading.value = false
@@ -512,9 +554,11 @@ function scoreClass(score) {
   return 'score-bad'
 }
 
-onMounted(() => {
-  refreshSyncStatus()
+onMounted(async () => {
+  await refreshSyncStatus()
   loadSectors()
+  // APP启动时后台自动同步可能已在进行 → 自动开始轮询进度
+  if (syncing.value || maSyncing.value || maWeekSyncing.value) startSyncPolling()
 })
 
 onUnmounted(() => stopSyncPolling())
@@ -536,7 +580,7 @@ onUnmounted(() => stopSyncPolling())
     align-items: start;
   }
   .col-side { display: block; position: sticky; top: 12px; }
-  .scan-controls, .filter-card, .scan-summary, .search-section, .scan-results,
+  .scan-controls, .data-card, .filter-card, .scan-summary, .search-section, .scan-results,
   .error-state, .loading, .empty-state { padding-left: 0; padding-right: 0; margin-left: 0; margin-right: 0; }
 }
 
@@ -550,6 +594,26 @@ onUnmounted(() => stopSyncPolling())
 .btn-col { display: flex; flex-direction: column; gap: 6px; }
 .scan-btn { flex-shrink: 0; }
 .sync-btn { flex-shrink: 0; }
+
+/* ── 数据管理卡片：快照 / 日均线 / 周均线 ── */
+.data-card {
+  margin: 0 12px 12px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border-radius: 10px;
+}
+.data-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+}
+.data-row + .data-row { border-top: 1px solid rgba(255,255,255,0.06); }
+.data-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.data-name { font-size: 13px; font-weight: bold; color: var(--text-primary); }
+.data-sub { font-size: 11px; color: var(--text-secondary); }
+.data-prog { font-size: 11px; font-family: monospace; }
 
 /* ── 周期叠加 + 属性筛选面板 ── */
 .filter-card {

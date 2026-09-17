@@ -25,9 +25,10 @@ function round4(x) {
 }
 
 /**
- * 日K → 均线快照。klines 为 [[date, close], ...]。
- * 上市不足 144 个交易日返回 null。
- * high20：不含当日的最近 20 个交易日最高收盘，用于"回踩"判定。
+ * K 线 → 均线快照。klines 为 [[date, close], ...]。
+ * 日K传入得日均线（144/288交易日），周K传入得周均线（144/288交易周），计算同构。
+ * 上市不足 144 根K线返回 null。
+ * high20：不含当根的最近 20 根最高收盘，用于"回踩"判定。
  */
 export function computeMaSnapshot(symbol, klines) {
   const closes = klines.map(([, c]) => c).filter(c => c)
@@ -49,7 +50,7 @@ export function computeMaSnapshot(symbol, klines) {
  * 是否"下跌至均线附近"。
  * 判定（两条同时成立）：
  * 1. 附近：|price/ma - 1| <= tol（默认 3%）；
- * 2. 回踩：此前 20 个交易日内最高收盘曾站上均线上沿 ma*(1+tol)，
+ * 2. 回踩：此前 20 根K线（交易日/交易周）内最高收盘曾站上均线上沿 ma*(1+tol)，
  *    即股价是从上方跌回均线，而非一直在线下徘徊。
  * 返回 [是否命中, 距离比例 price/ma-1]；缺数据返回 [false, null]。
  */

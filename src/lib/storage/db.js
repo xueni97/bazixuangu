@@ -3,18 +3,21 @@
  *
  * 替代 Python 后端的 SQLite，在 APP 端缓存：
  * - spot：全市场行情快照（symbol 为主键）
- * - ma：144/288 均线数据（symbol 为主键）
+ * - ma：144/288 日均线数据（symbol 为主键）
+ * - maWeek：144/288 周均线数据（symbol 为主键）
  * - meta：同步元信息（key/value，如 last_success_date、ma_trade_date）
  *
  * Android WebView 支持 IndexedDB，无需原生插件。
+ * v1→v2：新增 maWeek 仓库（老用户启动时 onupgradeneeded 自动建店）。
  */
 
 const DB_NAME = 'sequoia_v2'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 const STORES = {
   spot: 'symbol',
   ma: 'symbol',
+  maWeek: 'symbol',
   meta: 'key',
 }
 
@@ -135,4 +138,4 @@ export function setMeta(key, value) {
 }
 
 // 仓库名常量，供其他模块引用
-export const STORE = { SPOT: 'spot', MA: 'ma', META: 'meta' }
+export const STORE = { SPOT: 'spot', MA: 'ma', MA_WEEK: 'maWeek', META: 'meta' }
