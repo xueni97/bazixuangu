@@ -42,6 +42,39 @@ const LOOKBACK_DAYS = { day: 500, week: 2800 }
 const RR_TIMEOUT = 15000
 const RR_MAX_BYTES = 2 * 1024 * 1024
 
+// ── 熔断：网络封锁 10030 端口时避免每只票都等连接超时 ──
+// 连续失败达阈值后熔断一段时间，期间直接返回 [] 走 HTTP 兜底链；
+// 熔断到期后自动放少量探测流量，成功即恢复。
+const FAIL_LIMIT = 3
+const DISABLE_MS = 10 * 60 * 1000 // 熔断 10 分钟
+let _consecFails = 0
+let _disabledUntil = 0
+let _probing = false
+
+function bsMarkFail() {
+  _consecFails++
+  if (_consecFails >= FAIL_LIMIT) {
+    _disabledUntil = Date.now() + DISABLE_MS
+    _probing = false
+  }
+}
+function bsMarkOk() {
+  _consecFails = 0
+  _disabledUntil = 0
+  _probing = false
+}
+
+/** 熔断是否生效（到期放行一次探测，其余直接跳过）。 */
+function bsCircuitOpen() {
+  if (Date.now() < _disabledUntil) return true
+  if (_disabledUntil && !_probing) {
+    _probing = true // 只放一个探测请求
+    return false
+  }
+  if (_disabledUntil) return true // 探测进行中，其余继续跳过
+  return false
+}
+
 // ── CRC32（标准 zlib 表驱动，与 Python zlib.crc32 一致，无符号）──
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256)
@@ -119,7 +152,7 @@ class BsConnection {
       connectionId: this.id,
       host: HOST,
       port: PORT,
-      timeout: 8000,
+      timeout: 5000,
       noDelay: true,
       keepAlive: true,
     })
@@ -169,6 +202,8 @@ class BsConnection {
       try {
         await this.ensure()
         const arr = await this.rawRequest(type, body)
+        // 能拿到完整响应即说明链路健康（业务错误码不影响熔断判断）
+        bsMarkOk()
         // 会话过期/未登录：强制重连后重试一次
         if (arr[0] === '10001001' && attempt === 0) {
           this.loggedIn = false
@@ -178,6 +213,7 @@ class BsConnection {
         }
         return arr
       } catch (e) {
+        bsMarkFail() // 连接/登录/IO 异常计入熔断
         if (attempt === 0) {
           this.loggedIn = false
           this.conn = null
@@ -221,7 +257,7 @@ function nextConn() {
  * @returns {Promise<Array<[string, number]>>} [[date, close], ...]；不支持/失败为 []
  */
 export async function fetchKlineBs(symbol, period = 'day') {
-  if (!(await isAvailable())) return []
+  if (!(await isAvailable()) || bsCircuitOpen()) return []
   const code = bsCode(symbol)
   if (!code) return [] // 北交所
 
@@ -255,7 +291,7 @@ export async function fetchKlineBs(symbol, period = 'day') {
  * BaoStock 指数代码 sh.000001（区别于平安银行 sz.000001）。
  */
 export async function fetchIndexKlineBs(period = 'day') {
-  if (!(await isAvailable())) return []
+  if (!(await isAvailable()) || bsCircuitOpen()) return []
   const end = new Date()
   const start = new Date(end.getTime() - LOOKBACK_DAYS[period] * 86400000)
   const freq = period === 'week' ? 'w' : 'd'

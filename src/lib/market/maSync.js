@@ -169,15 +169,37 @@ async function latestTradeDate(period) {
   return null
 }
 
+/** 某周期均线是否需要同步：基准为指数最新交易日/周（非今天日期），覆盖率 <99% 也算落后。 */
+async function maNeedSync(period) {
+  if (!_spotCount) return false
+  const cfg = MA_CFG[period]
+  const count = period === 'day' ? _maCount : _maWeekCount
+  if (count < _spotCount * 0.99) return true
+  const latest = await latestTradeDate(period)
+  // 指数取数全挂（断网/限流）时不盲目触发全量，等网络恢复后的下次启动
+  if (!latest) return false
+  return _metaCache[cfg.dateKey] !== latest
+}
+
+const FLUSH_BATCH = 40 // 每 40 只立即落库一批：中断/杀进程后已拉取进度不丢
+
 /**
- * 通用均线同步。
+ * 通用均线同步（增量 + 断点续传）。
  * @param {'day'|'week'} period
- * @param {boolean} force true=全量重拉；false=增量（只拉落后标的）
+ * @param {boolean} force true=全量重拉；false=增量（只拉 tradeDate 落后于最新交易日/周的标的）
+ *
+ * 增量水位 = 个股记录的 tradeDate。每 FLUSH_BATCH 只批量落库一次，
+ * 因此中途退出/刷新后重启，已对齐最新交易日的票自动排除在 todo 之外，绝不重拉。
  */
 export async function syncMa(period = 'day', force = false) {
   const cfg = MA_CFG[period]
   const st = cfg.state
   if (st.status === 'syncing') return { ok: false, message: `${cfg.label}同步进行中` }
+  // 跨周期互斥：日/周同时并发会导致 8 连接打爆数据源；自动链会在当前周期完成后续跑另一周期
+  const otherPeriod = period === 'day' ? 'week' : 'day'
+  if (MA_CFG[otherPeriod].state.status === 'syncing') {
+    return { ok: false, message: `请等待${MA_CFG[otherPeriod].label}同步完成后再更新${cfg.label}（自动排队，无需重复点击）` }
+  }
   st.status = 'syncing'
   st.phase = '准备中'
   st.lastError = ''
@@ -185,9 +207,10 @@ export async function syncMa(period = 'day', force = false) {
   st.total = 0
   st.startedAt = now()
   st.finishedAt = ''
+  const barUnit = period === 'week' ? '交易周' : '交易日'
   try {
     let tradeDate = await latestTradeDate(period)
-    if (!tradeDate) tradeDate = _metaCache[cfg.dateKey] // 全源限流降级
+    if (!tradeDate) tradeDate = _metaCache[cfg.dateKey] // 指数全源失败时沿用旧水位
 
     const symbols = await db.getAllKeys('spot')
     if (!symbols.length) throw new Error('股票标的为空，请先同步全市场快照')
@@ -201,109 +224,134 @@ export async function syncMa(period = 'day', force = false) {
       : symbols.filter((s) => !tradeDate || existing[s] !== tradeDate)
     const skipped = symbols.length - todo.length
 
-    // 已是目标日期且覆盖率 >=99% 则跳过
-    if (!force && tradeDate && _metaCache[cfg.dateKey] === tradeDate) {
-      const coverage = 1 - todo.length / symbols.length
-      if (coverage >= 0.99) {
-        st.status = 'idle'
-        st.phase = ''
-        st.finishedAt = now()
-        return { ok: true, skipped: true, message: `${cfg.label}数据已为最新（${tradeDate}，${symbols.length}只）` }
+    // 已全部对齐：校正 meta 后直接跳过（同一天/同一交易周反复刷新不再重拉）
+    if (!todo.length) {
+      if (tradeDate && _metaCache[cfg.dateKey] !== tradeDate) {
+        await setMetaCached(cfg.dateKey, tradeDate)
+        await setMetaCached(cfg.atKey, `${dateStr()} ${now()}`)
       }
+      st.status = 'idle'
+      st.phase = ''
+      st.finishedAt = now()
+      return { ok: true, skipped: true, message: `${cfg.label}已为最新（${tradeDate || '?'}，${symbols.length}只）` }
+    }
+    // 增量模式下水位已对齐且覆盖率 >=99%，跳过少量缺口（次新股/退市）
+    if (!force && tradeDate && _metaCache[cfg.dateKey] === tradeDate && skipped / symbols.length >= 0.99) {
+      st.status = 'idle'
+      st.phase = ''
+      st.finishedAt = now()
+      return { ok: true, skipped: true, message: `${cfg.label}已为最新（${tradeDate}，${symbols.length}只）` }
     }
 
-    st.phase = `拉取${cfg.klineLabel}中`
-    st.total = symbols.length
-    st.done = skipped
+    // 进度只统计实际待拉数量（而非全市场 5916），避免"每次都像全量"的错觉
+    st.total = todo.length
+    st.done = 0
+    st.phase = `拉取${cfg.klineLabel} 0/${todo.length}（跳过${skipped}只最新）`
 
-    const records = []
     const failedSyms = []
+    let written = 0
 
-    // 并发池
+    // 并发池；每个 worker 用本地 buffer 分批落库（断点续传）
     let idx = 0
     const worker = async () => {
+      const local = []
+      const flushLocal = async () => {
+        if (!local.length) return 0
+        const batch = local.splice(0, local.length)
+        await db.bulkPut(cfg.store, batch)
+        written += batch.length
+        return batch.length
+      }
       while (idx < todo.length) {
         const sym = todo[idx++]
         try {
           const klines = await fetchSymbolKlines(sym, period)
-          const snap = computeMaSnapshot(sym, klines)
-          if (snap) {
-            snap.source = 'multi'
-            records.push(snap)
+          if (!klines.length) {
+            failedSyms.push(sym) // 源全失败/限流：稍后冷却补拉
           } else {
-            failedSyms.push(sym) // 次新股 <144 根，不算错误
+            const snap = computeMaSnapshot(sym, klines)
+            if (snap) {
+              snap.source = 'multi'
+              local.push(snap)
+              if (local.length >= FLUSH_BATCH) await flushLocal()
+            }
+            // snap=null 为次新股（<144 根K线），属正常情况，不补拉
           }
         } catch (e) {
           failedSyms.push(sym)
         }
         st.done++
-        if (st.done % 100 === 0) {
-          st.phase = `拉取${cfg.klineLabel}中 ${st.done}/${st.total}`
+        if (st.done % 50 === 0 || st.done === st.total) {
+          st.phase = `拉取${cfg.klineLabel} ${st.done}/${st.total}（跳过${skipped}只）`
         }
       }
+      await flushLocal()
     }
     await Promise.all(
       Array.from({ length: MA_WORKERS }, () => worker()),
     )
 
-    // 持久化（逐轮落库，限流中断也不丢进度）
-    if (records.length) {
-      st.phase = `写库中(${records.length}只)`
-      await db.bulkPut(cfg.store, records)
-      const eff = tradeDate ||
-        records.reduce((m, r) => (r.tradeDate > m ? r.tradeDate : m), '')
-      await setMetaCached(cfg.dateKey, eff)
-      await setMetaCached(cfg.atKey, `${dateStr()} ${now()}`)
-      if (period === 'day') _maCount = await db.count('ma')
-      else _maWeekCount = await db.count('maWeek')
-    }
-
-    // 限流失败：短冷却后补拉一轮（只补缺失项，不再重复全量）
-    const got = new Set(records.map((r) => r.symbol))
-    const stillMissing = failedSyms.filter((s) => !got.has(s))
-    if (stillMissing.length && records.length) {
-      st.phase = `冷却60s后补拉重试（${stillMissing.length}只）`
-      await sleep(60000)
-      const retryRecords = []
-      let idx2 = 0
-      const w2 = async () => {
-        while (idx2 < stillMissing.length) {
-          const sym = stillMissing[idx2++]
-          try {
-            const klines = await fetchSymbolKlines(sym, period)
-            const snap = computeMaSnapshot(sym, klines)
-            if (snap) retryRecords.push(snap)
-          } catch (e) {
-            // 忽略，剩余可再手动补
-          }
-        }
-      }
-      await Promise.all(Array.from({ length: 2 }, () => w2()))
-      if (retryRecords.length) {
-        await db.bulkPut(cfg.store, retryRecords)
-        if (period === 'day') _maCount = await db.count('ma')
-        else _maWeekCount = await db.count('maWeek')
-      }
-    }
-
-    if (!records.length) {
+    if (!written) {
       throw new Error(`未获取到任何有效${cfg.klineLabel}（数据源全部失败/限流中，请稍后重试）`)
     }
-    const effDate =
-      tradeDate ||
-      records.reduce((m, r) => (r.tradeDate > m ? r.tradeDate : m), '')
-    const totalCount = period === 'day' ? _maCount : _maWeekCount
+
+    // 水位与计数（个股记录已分批落库，此处只写 meta）
+    st.phase = '收尾中'
+    const effDate = tradeDate
+    await setMetaCached(cfg.dateKey, effDate)
+    await setMetaCached(cfg.atKey, `${dateStr()} ${now()}`)
+    const totalCount = await db.count(cfg.store)
+    if (period === 'day') _maCount = totalCount
+    else _maWeekCount = totalCount
+
+    // 限流失败：短冷却后补拉一轮（同样分批落库）。
+    // 注：成功的票已在 worker 内落库，与 failedSyms 互斥，故 failedSyms 即本轮仍缺失集合
+    let recovered = 0
+    if (failedSyms.length) {
+      st.phase = `冷却60s后补拉重试（${failedSyms.length}只）`
+      await sleep(60000)
+      let idx2 = 0
+      const w2 = async () => {
+        const local = []
+        while (idx2 < failedSyms.length) {
+          const sym = failedSyms[idx2++]
+          try {
+            const klines = await fetchSymbolKlines(sym, period)
+            const snap = klines.length ? computeMaSnapshot(sym, klines) : null
+            if (snap) {
+              snap.source = 'multi'
+              local.push(snap)
+              recovered++
+              if (local.length >= FLUSH_BATCH) {
+                const batch = local.splice(0, local.length)
+                await db.bulkPut(cfg.store, batch)
+              }
+            }
+          } catch (e) {
+            // 忽略，剩余可再手动点更新补齐
+          }
+        }
+        if (local.length) await db.bulkPut(cfg.store, local)
+      }
+      await Promise.all(Array.from({ length: 2 }, () => w2()))
+    }
+    const remainFailed = failedSyms.length - recovered
+    written += recovered
+
+    const finalCount = await db.count(cfg.store)
+    if (period === 'day') _maCount = finalCount
+    else _maWeekCount = finalCount
     st.status = 'idle'
     st.phase = ''
-    st.done = totalCount
+    st.done = st.total
     st.finishedAt = now()
-    let msg = `${cfg.label}同步完成：累计${totalCount}只（${period === 'week' ? '交易周' : '交易日'} ${effDate}）`
-    if (failedSyms.length) {
-      msg += `，${failedSyms.length}只无有效${cfg.klineLabel}（次新股/退市/源失败，可再点更新补齐）`
+    let msg = `${cfg.label}同步完成：新增/更新${written}只，累计${finalCount}只（${barUnit} ${effDate}）`
+    if (remainFailed > 0) {
+      msg += `，${remainFailed}只源失败（可再点更新补齐）`
     }
     return {
-      ok: true, message, count: totalCount,
-      tradeDate: effDate, updated: records.length, failed: failedSyms.length,
+      ok: true, message, count: finalCount,
+      tradeDate: effDate, updated: written, skipped, failed: remainFailed,
     }
   } catch (e) {
     st.status = 'failed'
@@ -318,28 +366,30 @@ export async function syncMa(period = 'day', force = false) {
 export function syncMaAsync(period = 'day', force = false) {
   const cfg = MA_CFG[period]
   if (cfg.state.status === 'syncing') return { ok: false, message: `${cfg.label}同步进行中` }
+  const otherPeriod = period === 'day' ? 'week' : 'day'
+  if (MA_CFG[otherPeriod].state.status === 'syncing') {
+    return { ok: false, message: `请等待${MA_CFG[otherPeriod].label}同步完成（完成后会自动衔接${cfg.label}）` }
+  }
   syncMa(period, force) // 不 await，后台执行
   return { ok: true, message: `已启动${cfg.label}后台同步` }
 }
 
 /**
  * 快照完成后串行推进均线链：day → week。
- * 仅当 meta 落后时触发，保证日/周均线不同时并发（防限流）。
+ * 以"指数最新交易日/周"为水位，仅落后时触发，保证日/周均线绝不同时并发（防限流）。
  */
 async function chainMaAfterSpot(period) {
   if (period === 'day') {
-    if (_metaCache.ma_trade_date !== dateStr() || _maCount < _spotCount * 0.99) {
+    if (await maNeedSync('day')) {
       const r = await syncMa('day', false)
-      // 日线完成/跳过/已最新后，衔接周线检查
-      if (r.ok) chainMaAfterSpot('week')
+      // 日线完成/跳过/失败后都尝试衔接周线检查（周线内部自有状态锁）
+      chainMaAfterSpot('week')
+      void r
     } else {
       chainMaAfterSpot('week')
     }
   } else if (period === 'week') {
-    // 周线增量基准是"最新交易周"，未知时同步一次即可；每周首次启动全量/增量
-    const latest = await latestTradeDate('week')
-    const need = !latest || _metaCache.ma_week_trade_date !== latest
-    if (need) await syncMa('week', false)
+    if (await maNeedSync('week')) await syncMa('week', false)
   }
 }
 
@@ -347,6 +397,7 @@ async function chainMaAfterSpot(period) {
  * APP 启动自动同步（串行链）：
  * 当日快照未拉 → 后台拉快照（完成后自动推进日/周均线）；
  * 快照已最新 → 检查日均线 → 再检查周均线。
+ * 水位=最新交易日/周：同一交易日内反复刷新/重进页面不会重复拉取。
  * 在 APP 挂载时调用，不阻塞 UI。
  */
 export async function autoSyncOnStartup() {
@@ -355,10 +406,10 @@ export async function autoSyncOnStartup() {
     syncSpotAsync()
     return
   }
-  // 快照已最新：日均线落后则先跑日线（其内部完成后不自动接周线，故此处串行调度）
-  if (_spotCount > 0 && (_metaCache.ma_trade_date !== dateStr() || _maCount < _spotCount * 0.99)) {
-    const r = await syncMa('day', false)
-    if (r.ok) chainMaAfterSpot('week')
+  // 快照已最新：日均线落后则先跑日线，完成后串行检查周线
+  if (await maNeedSync('day')) {
+    await syncMa('day', false)
+    chainMaAfterSpot('week')
   } else {
     chainMaAfterSpot('week')
   }

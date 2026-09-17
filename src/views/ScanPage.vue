@@ -39,14 +39,14 @@
               </span>
               <span v-if="maSyncing" class="data-prog syncing-txt">
                 {{ syncState.maPhase || '拉取日K中' }}
-                {{ syncState.maDone != null ? syncState.maDone + '/' + syncState.maTotal : '' }}
               </span>
               <span v-else-if="syncState.maStatus === 'failed'" class="data-prog err-txt">
                 {{ syncState.maLastError || '上次失败' }}
               </span>
             </div>
-            <van-button size="small" type="warning" plain :loading="maSyncing" @click="onSyncMa('day')">
-              {{ maSyncing ? '同步中' : '更新日均线' }}
+            <van-button size="small" type="warning" plain :loading="maSyncing"
+              :disabled="maWeekSyncing" @click="onSyncMa('day')">
+              {{ maSyncing ? '同步中' : (maWeekSyncing ? '排队中' : '更新日均线') }}
             </van-button>
           </div>
           <div class="data-row">
@@ -57,18 +57,18 @@
               </span>
               <span v-if="maWeekSyncing" class="data-prog syncing-txt">
                 {{ syncState.maWeekPhase || '拉取周K中' }}
-                {{ syncState.maWeekDone != null ? syncState.maWeekDone + '/' + syncState.maWeekTotal : '' }}
               </span>
               <span v-else-if="syncState.maWeekStatus === 'failed'" class="data-prog err-txt">
                 {{ syncState.maWeekLastError || '上次失败' }}
               </span>
             </div>
-            <van-button size="small" type="warning" plain :loading="maWeekSyncing" @click="onSyncMa('week')">
-              {{ maWeekSyncing ? '同步中' : '更新周均线' }}
+            <van-button size="small" type="warning" plain :loading="maWeekSyncing"
+              :disabled="maSyncing" @click="onSyncMa('week')">
+              {{ maWeekSyncing ? '同步中' : (maSyncing ? '排队中' : '更新周均线') }}
             </van-button>
           </div>
           <p class="settings-tip" style="margin:4px 0 0">
-            APP启动自动后台更新；日线首次约3~5分钟、周线约10分钟（BaoStock直连，超时自动东财/腾讯/新浪兜底）。
+            增量更新：只拉落后的票，已最新的自动跳过，进度随时退出不丢；日/周线串行执行。
           </p>
         </div>
 
@@ -476,6 +476,11 @@ async function onSyncMa(period = 'day') {
   try {
     // 日常更新走增量（只拉缺失/过期标的）；全量强制重拉由同步服务按交易日/周自动判断
     const r = await triggerMaSync(isWeek ? 'week' : 'day', false)
+    if (r && r.ok === false) {
+      // 跨周期互斥：另一周期同步中，自动链完成后会衔接
+      showToast(r.message || '另一周期均线同步中，请稍候')
+      return
+    }
     showToast(r.message || (isWeek ? '周均线同步已开始，约10分钟' : '日均线同步已开始，约3~5分钟'))
     if (r.skipped) return
     if (isWeek) maWeekSyncing.value = true
