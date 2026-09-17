@@ -15,9 +15,10 @@ import { fetchSpot } from './spot.js'
 import { fetchSymbolKlines, fetchIndexKlines } from './kline.js'
 import { computeMaSnapshot } from './ma.js'
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
 const MA_WORKERS = 4 // 并发（过高触发数据源 IP 限流断连）
+// 覆盖率达标线：全市场天然存在次新股(<144根)/停牌/退市等无效标的，不可能100%有均线，
+// 达到 90% 即视为数据完整（失败票仍可手动点更新或下个交易日增量补齐）
+const COV_OK = 0.9
 
 const p = (n) => String(n).padStart(2, '0')
 function now() {
@@ -132,7 +133,7 @@ export async function syncSpot() {
     spotState.finishedAt = now()
     // 快照就绪后串行链：日均线落后则同步，完成后再检查周均线
     if (rows.length > 0) {
-      chainMaAfterSpot('day')
+      chainMaAfterSpot('day').catch((e) => { spotState.lastError = String(e) })
     }
     return { ok: true, message: `同步成功(${source})，共${rows.length}只` }
   } catch (e) {
@@ -169,12 +170,12 @@ async function latestTradeDate(period) {
   return null
 }
 
-/** 某周期均线是否需要同步：基准为指数最新交易日/周（非今天日期），覆盖率 <99% 也算落后。 */
+/** 某周期均线是否需要同步：基准为指数最新交易日/周（非今天日期），覆盖率 <90% 也算落后。 */
 async function maNeedSync(period) {
   if (!_spotCount) return false
   const cfg = MA_CFG[period]
   const count = period === 'day' ? _maCount : _maWeekCount
-  if (count < _spotCount * 0.99) return true
+  if (count < _spotCount * COV_OK) return true
   const latest = await latestTradeDate(period)
   // 指数取数全挂（断网/限流）时不盲目触发全量，等网络恢复后的下次启动
   if (!latest) return false
@@ -235,8 +236,8 @@ export async function syncMa(period = 'day', force = false) {
       st.finishedAt = now()
       return { ok: true, skipped: true, message: `${cfg.label}已为最新（${tradeDate || '?'}，${symbols.length}只）` }
     }
-    // 增量模式下水位已对齐且覆盖率 >=99%，跳过少量缺口（次新股/退市）
-    if (!force && tradeDate && _metaCache[cfg.dateKey] === tradeDate && skipped / symbols.length >= 0.99) {
+    // 增量模式下水位已对齐且覆盖率达标，跳过缺口（次新股/停牌/退市）
+    if (!force && tradeDate && _metaCache[cfg.dateKey] === tradeDate && skipped / symbols.length >= COV_OK) {
       st.status = 'idle'
       st.phase = ''
       st.finishedAt = now()
@@ -304,39 +305,9 @@ export async function syncMa(period = 'day', force = false) {
     if (period === 'day') _maCount = totalCount
     else _maWeekCount = totalCount
 
-    // 限流失败：短冷却后补拉一轮（同样分批落库）。
-    // 注：成功的票已在 worker 内落库，与 failedSyms 互斥，故 failedSyms 即本轮仍缺失集合
-    let recovered = 0
-    if (failedSyms.length) {
-      st.phase = `冷却60s后补拉重试（${failedSyms.length}只）`
-      await sleep(60000)
-      let idx2 = 0
-      const w2 = async () => {
-        const local = []
-        while (idx2 < failedSyms.length) {
-          const sym = failedSyms[idx2++]
-          try {
-            const klines = await fetchSymbolKlines(sym, period)
-            const snap = klines.length ? computeMaSnapshot(sym, klines) : null
-            if (snap) {
-              snap.source = 'multi'
-              local.push(snap)
-              recovered++
-              if (local.length >= FLUSH_BATCH) {
-                const batch = local.splice(0, local.length)
-                await db.bulkPut(cfg.store, batch)
-              }
-            }
-          } catch (e) {
-            // 忽略，剩余可再手动点更新补齐
-          }
-        }
-        if (local.length) await db.bulkPut(cfg.store, local)
-      }
-      await Promise.all(Array.from({ length: 2 }, () => w2()))
-    }
-    const remainFailed = failedSyms.length - recovered
-    written += recovered
+    // 失败票不做集中补拉（旧逻辑 sleep 60s + 串行补拉会长时间卡住并阻塞周线）：
+    // 这些票未写 tradeDate，天然留在增量 todo 中，下次启动/手动更新自动补齐。
+    const remainFailed = failedSyms.length
 
     const finalCount = await db.count(cfg.store)
     if (period === 'day') _maCount = finalCount
@@ -347,10 +318,10 @@ export async function syncMa(period = 'day', force = false) {
     st.finishedAt = now()
     let msg = `${cfg.label}同步完成：新增/更新${written}只，累计${finalCount}只（${barUnit} ${effDate}）`
     if (remainFailed > 0) {
-      msg += `，${remainFailed}只源失败（可再点更新补齐）`
+      msg += `，${remainFailed}只源失败（下次打开自动补，也可再点更新）`
     }
     return {
-      ok: true, message, count: finalCount,
+      ok: true, message: msg, count: finalCount,
       tradeDate: effDate, updated: written, skipped, failed: remainFailed,
     }
   } catch (e) {
@@ -381,13 +352,10 @@ export function syncMaAsync(period = 'day', force = false) {
 async function chainMaAfterSpot(period) {
   if (period === 'day') {
     if (await maNeedSync('day')) {
-      const r = await syncMa('day', false)
-      // 日线完成/跳过/失败后都尝试衔接周线检查（周线内部自有状态锁）
-      chainMaAfterSpot('week')
-      void r
-    } else {
-      chainMaAfterSpot('week')
+      await syncMa('day', false)
     }
+    // 日线完成/跳过/失败后都衔接周线检查（周线内部自有状态锁）
+    await chainMaAfterSpot('week')
   } else if (period === 'week') {
     if (await maNeedSync('week')) await syncMa('week', false)
   }
@@ -407,10 +375,13 @@ export async function autoSyncOnStartup() {
     return
   }
   // 快照已最新：日均线落后则先跑日线，完成后串行检查周线
-  if (await maNeedSync('day')) {
-    await syncMa('day', false)
-    chainMaAfterSpot('week')
-  } else {
-    chainMaAfterSpot('week')
+  try {
+    if (await maNeedSync('day')) {
+      await syncMa('day', false)
+    }
+    await chainMaAfterSpot('week')
+  } catch (e) {
+    // 后台链异常不应中断 APP；各 sync 内部已自行兜底，这里仅防空
+    console.warn('autoSync chain error:', e)
   }
 }
