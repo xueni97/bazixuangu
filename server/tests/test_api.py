@@ -309,7 +309,7 @@ def test_scan_market_and_price_filter(client, temp_db):
 def test_composite_score_weighted_and_resonance():
     """综合评分 = 归一化加权 + 同向共振封顶；单周期退化为原日评分。"""
     from datetime import datetime
-    from sequoia_x.strategy.metaphysics import YuanhaiDecisionModel
+    from metaphysics import YuanhaiDecisionModel
 
     pd = YuanhaiDecisionModel.period_analyses(datetime(2026, 9, 14, 10))
     daily_only = YuanhaiDecisionModel.composite_score("火", pd, ["daily"], stock_name="测试")
