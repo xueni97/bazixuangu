@@ -25,7 +25,7 @@ from pathlib import Path
 
 import requests
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  # 仓库根（bazixuangu/）
 
 # .env 加载（可选；无 python-dotenv 时回落到系统环境变量）
 try:

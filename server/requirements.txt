@@ -9,7 +9,7 @@ gunicorn>=21.2
 akshare>=1.12
 requests>=2.31
 
-# 命理引擎（项目内 sequoia_x.strategy.metaphysics，无外部包）
+# 命理引擎（server/metaphysics/ 内置包，无外部依赖）
 
 # 环境配置
 python-dotenv>=1.0

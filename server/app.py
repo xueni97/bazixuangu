@@ -20,7 +20,9 @@ from pathlib import Path
 
 from flask import Blueprint, Flask, jsonify, request, send_from_directory
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  # 仓库根（bazixuangu/）
+SERVER_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SERVER_DIR))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # .env 加载（可选；无 python-dotenv 时回落到系统环境变量）
@@ -36,7 +38,7 @@ FLASK_HOST = os.environ.get("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.environ.get("FLASK_PORT", "5175"))
 FLASK_DEBUG = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
 
-from sequoia_x.strategy.metaphysics import (  # noqa: E402
+from metaphysics import (  # noqa: E402
     StockElementAnalyzer,
     YuanhaiDecisionModel,
 )
