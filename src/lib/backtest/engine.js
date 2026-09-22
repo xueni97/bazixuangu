@@ -126,6 +126,11 @@ export async function runBacktest(model, startDate, onProgress = null) {
   }
 
   // ── 阶段1：预拉K线 ──
+  // 三种数据源自动选择（构建期注入 VITE_API_BASE 决定）：
+  //   1. 远程模式：VITE_API_BASE 有值 → 优先 POST /api/klines/batch 一次批量拉
+  //      缺失再单只 GET /api/klines?symbol=xxx 兜底（服务器 cron 已拉好 SQLite）
+  //   2. 本地模式：无 VITE_API_BASE → 优先 IndexedDB kline 仓库（maSync 已缓存）
+  //      缺失才 4 并发 fetchSymbolKlines 网络兜底链 + 写回 kline 仓库
   progress('fetching', 0, 1)
   const spotRows = await db.getAll('spot')
   const candidates = filterUniverse(spotRows, model)
@@ -133,19 +138,99 @@ export async function runBacktest(model, startDate, onProgress = null) {
     return makeEmptyResult(model, startDate, '无候选股票（检查筛选条件）')
   }
 
-  // 4并发拉K线
+  const API_BASE = (import.meta.env && import.meta.env.VITE_API_BASE) || ''
   const klineMap = new Map()
-  let cursor = 0
-  const pull = async () => {
-    while (cursor < candidates.length) {
-      const c = candidates[cursor++]
-      const klines = await fetchSymbolKlines(c.symbol, 'day')
-      if (klines && klines.length >= MA_MIN_BARS) klineMap.set(c.symbol, klines)
-      if (cursor % 20 === 0) progress('fetching', cursor, candidates.length)
+  let cachedCount = 0
+  let missing = candidates
+
+  if (API_BASE) {
+    // ── 远程模式：服务器 SQLite 直读 ──
+    // 一次 POST /api/klines/batch 拉全部候选（最多 2000 只）
+    const CHUNK = 2000
+    for (let i = 0; i < candidates.length; i += CHUNK) {
+      const chunk = candidates.slice(i, i + CHUNK).map((c) => c.symbol)
+      try {
+        const resp = await fetch(`${API_BASE}/api/klines/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbols: chunk }),
+        })
+        const data = await resp.json()
+        const map = (data && data.map) || {}
+        for (const sym of chunk) {
+          const bars = map[sym]
+          if (bars && bars.length >= MA_MIN_BARS) {
+            klineMap.set(sym, bars)
+            cachedCount++
+          }
+        }
+      } catch (e) {
+        // 网络错误继续，下面单只兜底
+      }
+      progress('fetching', Math.min(i + CHUNK, candidates.length), candidates.length)
+    }
+    // 缺失的单只兜底
+    missing = candidates.filter((c) => !klineMap.has(c.symbol))
+    if (missing.length) {
+      let mcursor = 0
+      const mpull = async () => {
+        while (mcursor < missing.length) {
+          const c = missing[mcursor++]
+          try {
+            const r = await fetch(`${API_BASE}/api/klines?symbol=${encodeURIComponent(c.symbol)}`)
+            const d = await r.json()
+            const bars = d && d.bars
+            if (bars && bars.length >= MA_MIN_BARS) klineMap.set(c.symbol, bars)
+          } catch (e) { /* 忽略单只失败 */ }
+          if (mcursor % 20 === 0) progress('fetching', mcursor, missing.length)
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(MA_WORKERS, missing.length) }, mpull))
+    }
+  } else {
+    // ── 本地模式：IndexedDB + 网络兜底链 ──
+    // 先读本地 kline 仓库（maSync 时已缓存）
+    const cachedRows = await db.getAll('kline')
+    for (const row of cachedRows) {
+      if (row && row.symbol && Array.isArray(row.bars) && row.bars.length) {
+        klineMap.set(row.symbol, row.bars)
+        cachedCount++
+      }
+    }
+    // 找出本地缺失或K线不足的候选，4并发兜底拉网络
+    missing = candidates.filter((c) => !klineMap.has(c.symbol) || (klineMap.get(c.symbol) || []).length < MA_MIN_BARS)
+    let cursor = 0
+    const newCached = [] // 兜底拉到的也写回 kline 仓库，下次免拉
+    const pull = async () => {
+      while (cursor < missing.length) {
+        const c = missing[cursor++]
+        const klines = await fetchSymbolKlines(c.symbol, 'day')
+        if (klines && klines.length) {
+          klineMap.set(c.symbol, klines)
+          if (klines.length >= MA_MIN_BARS) {
+            newCached.push({
+              symbol: c.symbol,
+              bars: klines,
+              tradeDate: klines[klines.length - 1][0],
+              barsCount: klines.length,
+              updatedAt: Date.now(),
+            })
+          }
+        }
+        if (cursor % 20 === 0) progress('fetching', cursor, Math.max(missing.length, 1))
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(MA_WORKERS, missing.length) }, pull))
+    // 兜底拉到的批量写回（失败不影响主流程）
+    if (newCached.length) {
+      try { await db.bulkPut('kline', newCached) } catch (e) { /* 忽略缓存写失败 */ }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(MA_WORKERS, candidates.length) }, pull))
   progress('fetching', candidates.length, candidates.length)
+  // 进度备注：本地缓存 N 只 / 兜底拉 M 只
+  if (onProgress) {
+    onProgress({ phase: 'fetching', done: candidates.length, total: candidates.length, cached: cachedCount, missing: missing.length })
+  }
 
   // 过滤掉K线不足的票
   const validCandidates = candidates.filter((c) => klineMap.has(c.symbol))
@@ -184,17 +269,22 @@ export async function runBacktest(model, startDate, onProgress = null) {
       return row && row[1] != null ? Number(row[1]) : 0
     }
 
-    // 先卖
-    // 1. 卖出信号 → 清仓
-    if (['卖出', '减仓'].includes(signal.action)) {
+    // 先卖（按卖出策略 exitStrategy: signal|holdDays|both）
+    // signal: 仅按买点信号里的卖出/减仓动作清仓
+    // holdDays: 仅按持仓天数到期卖出，忽略信号
+    // both: 两者任一触发即卖（取早）
+    const exitStrategy = model.exitStrategy || 'both'
+    if ((exitStrategy === 'signal' || exitStrategy === 'both')
+        && ['卖出', '减仓'].includes(signal.action)) {
       const sells = sellAll(pf, closeOf, dateStr, 'signal')
       trades.push(...sells)
     }
-    // 2. 持仓到期 → 卖出
-    const expired = [...pf.positions.values()].filter((p) => p.holdDays >= model.holdDays)
-    for (const p of expired) {
-      const t = sell(pf, p.symbol, closeOf(p.symbol), dateStr, 'expired')
-      if (t) trades.push(t)
+    if (exitStrategy === 'holdDays' || exitStrategy === 'both') {
+      const expired = [...pf.positions.values()].filter((p) => p.holdDays >= model.holdDays)
+      for (const p of expired) {
+        const t = sell(pf, p.symbol, closeOf(p.symbol), dateStr, 'expired')
+        if (t) trades.push(t)
+      }
     }
 
     tickHoldDays(pf)

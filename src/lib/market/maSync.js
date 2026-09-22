@@ -253,13 +253,20 @@ export async function syncMa(period = 'day', force = false) {
     let written = 0
 
     // 并发池；每个 worker 用本地 buffer 分批落库（断点续传）
+    // 日K周期同步把原始K线一并写入 kline 仓库，回测引擎直接读库不再拉网络
+    const cacheKline = period === 'day'
     let idx = 0
     const worker = async () => {
       const local = []
+      const klineLocal = []
       const flushLocal = async () => {
-        if (!local.length) return 0
+        if (!local.length && !klineLocal.length) return 0
         const batch = local.splice(0, local.length)
-        await db.bulkPut(cfg.store, batch)
+        const klineBatch = klineLocal.splice(0, klineLocal.length)
+        const jobs = []
+        if (batch.length) jobs.push(db.bulkPut(cfg.store, batch))
+        if (klineBatch.length) jobs.push(db.bulkPut('kline', klineBatch))
+        await Promise.all(jobs)
         written += batch.length
         return batch.length
       }
@@ -274,9 +281,21 @@ export async function syncMa(period = 'day', force = false) {
             if (snap) {
               snap.source = 'multi'
               local.push(snap)
-              if (local.length >= FLUSH_BATCH) await flushLocal()
             }
             // snap=null 为次新股（<144 根K线），属正常情况，不补拉
+            // 原始日K即便次新股也缓存（回测候选可能用到）
+            if (cacheKline && klines.length) {
+              klineLocal.push({
+                symbol: sym,
+                bars: klines,
+                tradeDate: klines[klines.length - 1][0],
+                barsCount: klines.length,
+                updatedAt: Date.now(),
+              })
+            }
+            if (local.length >= FLUSH_BATCH || klineLocal.length >= FLUSH_BATCH) {
+              await flushLocal()
+            }
           }
         } catch (e) {
           failedSyms.push(sym)

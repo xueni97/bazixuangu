@@ -1,0 +1,15 @@
+# 渊海子平八字选股 Flask 后端依赖
+# Python 3.11+ 推荐（已验证 3.14 也可）
+
+# Web 框架
+Flask>=3.0
+gunicorn>=21.2
+
+# 数据源
+akshare>=1.12
+requests>=2.31
+
+# 命理引擎（项目内 sequoia_x.strategy.metaphysics，无外部包）
+
+# 环境配置
+python-dotenv>=1.0

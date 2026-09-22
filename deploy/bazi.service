@@ -1,0 +1,19 @@
+# 渊海子平八字选股 Flask 服务 - systemd 单元模板
+# 复制到 /etc/systemd/system/ 后执行:
+#   systemctl daemon-reload && systemctl enable --now bazi
+# 部署时按实际安装路径修改 WorkingDirectory / EnvironmentFile / ExecStart。
+
+[Unit]
+Description=渊海子平八字选股 Flask 服务
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/bazi-stock-app/server
+EnvironmentFile=/opt/bazi-stock-app/.env
+User=www-data
+ExecStart=/opt/bazi-stock-app/.venv/bin/gunicorn app:app --workers 4 --bind 0.0.0.0:5000
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

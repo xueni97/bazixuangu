@@ -11,15 +11,18 @@
  * Android WebView 支持 IndexedDB，无需原生插件。
  * v1→v2：新增 maWeek 仓库（老用户启动时 onupgradeneeded 自动建店）。
  * v2→v3：新增 watchlist 仓库（自选观察 / 次日胜率）。
+ * v3→v4：新增 kline 仓库（原始日K缓存，回测引擎直接读库不再拉网络）。
+ *   结构：{ symbol, bars:[[date,close],...], tradeDate, barsCount, updatedAt }
  */
 
 const DB_NAME = 'sequoia_v2'
-const DB_VERSION = 3
+const DB_VERSION = 4
 
 const STORES = {
   spot: 'symbol',
   ma: 'symbol',
   maWeek: 'symbol',
+  kline: 'symbol',
   watchlist: 'id',
   meta: 'key',
 }
@@ -142,6 +145,6 @@ export function setMeta(key, value) {
 
 // 仓库名常量，供其他模块引用
 export const STORE = {
-  SPOT: 'spot', MA: 'ma', MA_WEEK: 'maWeek',
+  SPOT: 'spot', MA: 'ma', MA_WEEK: 'maWeek', KLINE: 'kline',
   WATCHLIST: 'watchlist', META: 'meta',
 }
