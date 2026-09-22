@@ -39,7 +39,16 @@
 
     <!-- 一键组 vs 手动组 -->
     <div v-if="records.length" class="compare-card">
-      <div class="card-title">一键组 vs 手动组</div>
+      <div class="card-title">
+        一键组 vs 手动组
+        <van-button
+          v-if="!isPostMarket"
+          size="mini" plain type="warning" class="preview-btn"
+          :loading="previewing" @click="doPreview"
+        >
+          实时预览浮动
+        </van-button>
+      </div>
       <div class="cmp-row">
         <div v-for="s in srcStats" :key="s.source" class="cmp-item">
           <span class="cmp-name" :class="s.source === 'auto' ? 'tag-auto' : 'tag-manual'">
@@ -101,6 +110,14 @@
                   <span class="rec-talk" :class="pnlClass(r.pnlPct)">{{ talkLabel(r) }}</span>
                   <span class="rec-pnl" :class="pnlClass(r.pnlPct)">{{ fmt(r.pnlPct) }}%</span>
                 </template>
+                <template v-else-if="previewMap.get(r.id)">
+                  <span class="rec-talk preview" :class="pnlClass(previewMap.get(r.id).unrealizedPnl)">
+                    浮{{ fmt(previewMap.get(r.id).unrealizedPnl) }}%
+                  </span>
+                  <span class="rec-pnl preview" :class="pnlClass(previewMap.get(r.id).unrealizedPnl)">
+                    {{ Number(previewMap.get(r.id).currentPrice).toFixed(2) }}
+                  </span>
+                </template>
                 <span v-else class="rec-talk pending">等开奖</span>
               </div>
             </div>
@@ -154,11 +171,12 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { showToast, showConfirmDialog } from 'vant'
 import {
   listRecords, settleWatchlist, removeRecord, groupRecords,
   overallStats, sourceStats, conditionStats, addWatchlist,
+  isAfterMarketClose, previewSettlement, getSignalDate,
 } from '../lib/watchlist.js'
 import { searchStocks } from '../api'
 
@@ -168,6 +186,9 @@ const progress = ref({ done: 0, total: 0 })
 const openGroups = ref(new Set())
 const openRecs = ref(new Set())
 const reEntering = ref(null)
+const previews = ref([])
+const previewing = ref(false)
+const isPostMarket = ref(true)
 
 const groups = computed(() => groupRecords(records.value))
 const stats = computed(() => overallStats(records.value))
@@ -175,6 +196,13 @@ const srcStats = computed(() => sourceStats(records.value))
 const condStats = computed(() => conditionStats(records.value))
 const progressText = computed(() =>
   (progress.value.total ? `${progress.value.done}/${progress.value.total}` : ''))
+
+// 预览记录映射：id → preview 对象
+const previewMap = computed(() => {
+  const m = new Map()
+  for (const p of previews.value) m.set(p.id, p)
+  return m
+})
 
 // 总胜率环：≥60%红（赢面大）、<40%绿、中间灰
 const ringStyle = computed(() => {
@@ -266,6 +294,31 @@ async function load(doSettle) {
   }
 }
 
+async function doPreview() {
+  previewing.value = true
+  try {
+    previews.value = await previewSettlement((done, total) => {
+      progress.value = { done, total }
+    })
+  } catch (e) {
+    showToast('预览失败：' + (e.message || '本地数据异常'))
+  } finally {
+    previewing.value = false
+  }
+}
+
+// 挂载逻辑：盘后自动结算，盘中仅列表+预览浮动
+onMounted(async () => {
+  const maTradeDate = await getSignalDate()
+  isPostMarket.value = isAfterMarketClose(maTradeDate)
+  if (isPostMarket.value) {
+    await load(true) // 盘后自动结算
+  } else {
+    await load(false) // 盘中仅列表
+    await doPreview() // 自动预览一次浮动
+  }
+})
+
 async function onDelete(r) {
   try {
     await showConfirmDialog({
@@ -311,8 +364,6 @@ async function onReEnter(r) {
   }
 }
 
-// 首次进入：先结算到期记录（拉日K，有进度），再出统计
-load(true)
 </script>
 
 <style scoped>
@@ -439,7 +490,9 @@ load(true)
 .rec-talk.down { background: rgba(76,175,80,0.15); }
 .rec-talk.flat { background: rgba(158,158,158,0.15); }
 .rec-talk.pending { background: rgba(245,166,35,0.12); color: #f5a623; }
-.rec-pnl { font-size: 15px; font-weight: bold; font-family: monospace; min-width: 58px; text-align: right; }
+.rec-talk.preview { background: rgba(245,166,35,0.08); color: #f5a623; opacity: 0.85; }
+.rec-pnl.preview { opacity: 0.75; font-size: 13px; }
+.preview-btn { float: right; }
 
 /* 以中线为原点的涨跌横条 */
 .rec-bar { position: relative; height: 5px; margin: 8px 0 4px; background: rgba(255,255,255,0.06); border-radius: 3px; }

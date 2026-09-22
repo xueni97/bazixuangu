@@ -36,6 +36,11 @@ const routes = [
     name: 'watchlist',
     component: () => import('../views/WatchlistPage.vue'),
   },
+  {
+    path: '/backtest',
+    name: 'backtest',
+    component: () => import('../views/BacktestPage.vue'),
+  },
 ]
 
 const router = createRouter({

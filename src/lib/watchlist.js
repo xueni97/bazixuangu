@@ -75,9 +75,8 @@ export async function addWatchlist(items, opts = {}) {
       continue
     }
     const mrow = maMap[it.symbol]
-    const entryPrice = it.price != null
-      ? Number(it.price)
-      : (mrow && mrow.close != null ? Number(mrow.close) : null)
+    // entryPrice 固定用收盘价（ma.close），不用盘中实时价 it.price
+    const entryPrice = (mrow && mrow.close != null) ? Number(mrow.close) : null
     records.push({
       id,
       signalDate,
@@ -167,6 +166,94 @@ export async function settleWatchlist(onProgress = null) {
     else flat++
   }
   return { checked: pending.length, settled, win, lose, flat, noData }
+}
+
+// ── 盘中预览浮动（不写库） ─────────────────────────────────
+/**
+ * 判断当前是否盘后（收盘后）。
+ * @param {string|null} maTradeDate - 日均线表最新交易日 'YYYY-MM-DD'
+ * 周末→true；工作日≥15:00→true；工作日<15:00→false；
+ * 节假日（today > maTradeDate 且≥15:00）→true
+ */
+export function isAfterMarketClose(maTradeDate) {
+  const now = new Date()
+  const day = now.getDay() // 0=周日, 6=周六
+  const hour = now.getHours()
+  // 周末
+  if (day === 0 || day === 6) return true
+  // 工作日 ≥15:00
+  if (hour >= 15) return true
+  // 节假日：today > maTradeDate 且 ≥15:00（上面已判≥15:00，这里只判节假日）
+  // 但节假日 <15:00 也算盘中（盘前），不算盘后
+  return false
+}
+
+/**
+ * 盘中实时预览浮动盈亏（不写库）。
+ * 拉 spot 表获取盘中价，spot 缺失时拉日K最新收盘。
+ * 仅对 pending 记录计算 unrealizedPnl。
+ * @param {function|null} onProgress - 进度回调(done, total)
+ * @returns {Promise<Array>} 预览记录数组
+ */
+export async function previewSettlement(onProgress = null) {
+  const recs = await listRecords()
+  const pending = recs.filter((r) => r.status !== 'settled' && r.entryPrice != null)
+  if (!pending.length) return []
+
+  // 拉 spot 表
+  const spotRows = await db.getAll('spot')
+  const spotMap = {}
+  for (const s of spotRows) spotMap[s.symbol] = s
+
+  // 找出 spot 缺失的票，需拉日K
+  const needKline = pending.filter((r) => !spotMap[r.symbol] || spotMap[r.symbol].price == null)
+  const klineMap = {}
+  if (needKline.length) {
+    const CONC = 4
+    let cursor = 0
+    const pull = async () => {
+      while (cursor < needKline.length) {
+        const sym = needKline[cursor++].symbol
+        const klines = await fetchKlines(sym)
+        // 取最后一根K线的收盘
+        if (klines && klines.length) {
+          const last = klines[klines.length - 1]
+          klineMap[sym] = last && last[1] != null ? Number(last[1]) : null
+        }
+        if (onProgress) onProgress(cursor, needKline.length)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONC, needKline.length) }, pull))
+  }
+
+  const previewTime = Date.now()
+  const previews = []
+  for (const rec of pending) {
+    const spot = spotMap[rec.symbol]
+    let currentPrice = null
+    let priceSource = null
+    if (spot && spot.price != null) {
+      currentPrice = Number(spot.price)
+      priceSource = 'spot'
+    } else if (klineMap[rec.symbol] != null) {
+      currentPrice = klineMap[rec.symbol]
+      priceSource = 'kline_close'
+    }
+    if (currentPrice == null || !(rec.entryPrice > 0)) continue
+    const unrealizedPnl = Math.round(((currentPrice - rec.entryPrice) / rec.entryPrice) * 10000) / 100
+    let unrealizedResult = 'flat'
+    if (unrealizedPnl > FLAT_EPS) unrealizedResult = 'win'
+    else if (unrealizedPnl < -FLAT_EPS) unrealizedResult = 'lose'
+    previews.push({
+      ...rec,
+      currentPrice,
+      priceSource,
+      unrealizedPnl,
+      unrealizedResult,
+      previewTime,
+    })
+  }
+  return previews
 }
 
 // ── 统计（纯函数，便于测试） ──────────────────────────────
