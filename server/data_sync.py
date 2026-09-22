@@ -792,49 +792,10 @@ def sync_ma(force: bool = False) -> dict:
                 return {"ok": True, "skipped": True,
                         "message": f"均线数据已为最新（{trade_date}，{len(symbols)}只）"}
 
-        def _run_round(targets, phase, workers):
-            """并发拉取一轮，返回 (新均线行, 仍失败标的, 日K缓存行)。"""
-            records, failed_syms, kline_recs = [], [], []
-            with _ma_lock:
-                _ma_state.update(done=0, total=len(targets))
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {pool.submit(fetch_symbol_klines_ex, s): s
-                           for s in targets}
-                for fut in as_completed(futures):
-                    sym = futures[fut]
-                    try:
-                        klines, source = fut.result()
-                        # 原始日K一律缓存（次新股也存，回测/扫描可调用）
-                        if klines:
-                            kline_recs.append({
-                                "symbol": sym,
-                                "bars_json": json.dumps(klines),
-                                "trade_date": klines[-1][0],
-                                "bars_count": len(klines),
-                            })
-                        snap = compute_ma_snapshot(sym, klines)
-                        if snap:
-                            snap["source"] = source or "em"
-                            records.append(snap)
-                        else:
-                            failed_syms.append(sym)  # 次新股 <144 根，不算错误
-                    except Exception:  # noqa: BLE001
-                        failed_syms.append(sym)
-                    with _ma_lock:
-                        _ma_state["done"] += 1
-                        n = _ma_state["done"]
-                        if n % 100 == 0:
-                            _ma_state["phase"] = f"{phase} {n}/{_ma_state['total']}"
-            return records, failed_syms, kline_recs
-
-        with _ma_lock:
-            _ma_state.update(phase="拉取日K中", total=len(symbols),
-                             done=skipped_have)
-
-        records, failed_syms, kline_recs = _run_round(todo, "拉取日K中", MA_WORKERS)
+        PERSIST_EVERY = 500  # 每拉满 N 只落库一次（首次全量可见进度、中断少丢）
 
         def _persist(batch, klines_batch, mark_meta: bool):
-            """把一轮结果落库（均线 + 原始K线，逐轮持久化，限流中断也不丢进度）。"""
+            """落库一批（均线 + 原始K线）；mark_meta=True 时写水位 meta。"""
             if not batch and not klines_batch:
                 return
             with _ma_lock:
@@ -872,8 +833,64 @@ def sync_ma(force: bool = False) -> dict:
             finally:
                 conn.close()
 
-        # 首轮结果先落库（含交易日 meta，扫描即可用；覆盖不全时下次自动补）
-        _persist(records, kline_recs, bool(records))
+        def _run_round(targets, phase, workers):
+            """并发拉取一轮，每 PERSIST_EVERY 只分批落库（进度可见/中断少丢）。
+
+            返回 (累计均线行, 仍失败标的, 累计日K行)，仅供统计与补拉对比；
+            数据本体已随分批落库写入，调用方勿再重复 _persist。
+            """
+            all_records, all_klines = [], []
+            pending_r, pending_k = [], []
+            failed_syms = []
+            with _ma_lock:
+                _ma_state.update(done=0, total=len(targets))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(fetch_symbol_klines_ex, s): s
+                           for s in targets}
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    try:
+                        klines, source = fut.result()
+                        # 原始日K一律缓存（次新股也存，回测/扫描可调用）
+                        if klines:
+                            rec = {
+                                "symbol": sym,
+                                "bars_json": json.dumps(klines),
+                                "trade_date": klines[-1][0],
+                                "bars_count": len(klines),
+                            }
+                            pending_k.append(rec)
+                            all_klines.append(rec)
+                        snap = compute_ma_snapshot(sym, klines)
+                        if snap:
+                            snap["source"] = source or "em"
+                            pending_r.append(snap)
+                            all_records.append(snap)
+                        else:
+                            failed_syms.append(sym)  # 次新股 <144 根，不算错误
+                    except Exception:  # noqa: BLE001
+                        failed_syms.append(sym)
+                    with _ma_lock:
+                        _ma_state["done"] += 1
+                        n = _ma_state["done"]
+                        if n % 100 == 0:
+                            _ma_state["phase"] = f"{phase} {n}/{_ma_state['total']}"
+                            print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
+                                  f"{phase} {n}/{_ma_state['total']}", flush=True)
+                        if n % PERSIST_EVERY == 0:
+                            _persist(pending_r, pending_k, False)
+                            print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
+                                  f"已落库 {n}/{_ma_state['total']} 只", flush=True)
+                            pending_r, pending_k = [], []
+            if pending_r or pending_k:
+                _persist(pending_r, pending_k, False)
+            return all_records, failed_syms, all_klines
+
+        with _ma_lock:
+            _ma_state.update(phase="拉取日K中", total=len(symbols),
+                             done=skipped_have)
+
+        records, failed_syms, kline_recs = _run_round(todo, "拉取日K中", MA_WORKERS)
 
         # 限流导致的失败：长冷却后降速补拉三轮（东财单 IP 配额窗口约数分钟，
         # 次新股/退市无数据会自然残留；逐轮落库，中途无新增即收尾）
@@ -890,12 +907,25 @@ def sync_ma(force: bool = False) -> dict:
                 still_missing, f"补拉重试{rnd}轮", max(2, MA_WORKERS // 2))
             records.extend(more)
             kline_recs.extend(more_klines)
-            _persist(more, more_klines, False)
 
         if not records:
             raise RuntimeError("未获取到任何有效日K（数据源全部失败/限流中，请稍后重试）")
 
+        # 数据已随 _run_round 分批落库，此处补写水位 meta（次日增量依据）
         effective_date = trade_date or max(r["trade_date"] for r in records)
+        mark_conn = get_conn()
+        try:
+            with mark_conn:
+                mark_conn.execute(
+                    "INSERT OR REPLACE INTO sync_meta (key, value) "
+                    "VALUES ('ma_trade_date', ?)", (effective_date,))
+                mark_conn.execute(
+                    "INSERT OR REPLACE INTO sync_meta (key, value) "
+                    "VALUES ('ma_updated_at', ?)",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
+        finally:
+            mark_conn.close()
+
         total_have = get_ma_count()
         with _ma_lock:
             _ma_state.update(status="idle", phase="", done=total_have,
