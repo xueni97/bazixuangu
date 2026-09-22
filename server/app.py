@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import sys
 from datetime import datetime
@@ -22,6 +23,19 @@ from flask import Blueprint, Flask, jsonify, request, send_from_directory
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# .env 加载（可选；无 python-dotenv 时回落到系统环境变量）
+try:
+    from dotenv import load_dotenv  # type: ignore
+    _env = PROJECT_ROOT / ".env"
+    if _env.exists():
+        load_dotenv(_env)
+except ImportError:
+    pass
+
+FLASK_HOST = os.environ.get("FLASK_HOST", "0.0.0.0")
+FLASK_PORT = int(os.environ.get("FLASK_PORT", "5175"))
+FLASK_DEBUG = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
+
 from sequoia_x.strategy.metaphysics import (  # noqa: E402
     StockElementAnalyzer,
     YuanhaiDecisionModel,
@@ -30,6 +44,8 @@ from sequoia_x.strategy.metaphysics import (  # noqa: E402
 from data_sync import (  # noqa: E402
     DB_PATH,
     ensure_tables,
+    fetch_klines_batch_from_db,
+    fetch_klines_from_db,
     get_conn,
     get_spot_count,
     get_state,
@@ -391,6 +407,63 @@ def sync_status():
     return jsonify(get_state())
 
 
+@api.route("/klines")
+def klines():
+    """单只股票日K（[[date, close], ...]）。
+
+    直读 stock_kline 表（cron/手动 sync_ma 时已缓存）。
+    无缓存兜底调 fetch_symbol_klines_ex 实时拉 + 回写。
+    用于浏览器访问服务器 Web 版回测时免拉网络。
+    """
+    symbol = (request.args.get("symbol") or "").strip()
+    if not symbol:
+        return _json_err("缺少参数 symbol", 400)
+    bars = fetch_klines_from_db(symbol)
+    if not bars:
+        # 兜底：实时拉 + 回写 stock_kline
+        from data_sync import fetch_symbol_klines_ex  # noqa: PLC0415
+        bars_raw, _src = fetch_symbol_klines_ex(symbol)
+        if bars_raw:
+            bars = [[d, c] for d, c in bars_raw]
+            # 回写缓存（不影响主流程，失败不抛）
+            try:
+                import json as _json  # noqa: PLC0415
+                from data_sync import get_conn, ensure_tables  # noqa: PLC0415
+                from datetime import datetime as _dt  # noqa: PLC0415
+                conn = get_conn()
+                try:
+                    ensure_tables(conn)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO stock_kline "
+                        "(symbol, bars_json, trade_date, bars_count, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (symbol, _json.dumps(bars_raw),
+                         bars_raw[-1][0], len(bars_raw),
+                         _dt.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return jsonify({"symbol": symbol, "bars": bars})
+
+
+@api.route("/klines/batch", methods=["POST"])
+def klines_batch():
+    """批量日K预读（回测候选列表一次性取，避免 N 次 /klines 往返）。
+
+    body: {"symbols": ["600519", "000001", ...]}
+    返回: {"map": {"600519": [[date, close], ...], ...}}
+    """
+    body = request.get_json(silent=True) or {}
+    syms = body.get("symbols") or []
+    if not isinstance(syms, list) or not syms:
+        return _json_err("body 缺少 symbols 数组", 400)
+    syms = [s for s in syms if isinstance(s, str) and s.strip()][:2000]
+    m = fetch_klines_batch_from_db(syms)
+    return jsonify({"map": m})
+
+
 app.register_blueprint(api)
 
 
@@ -418,6 +491,7 @@ if __name__ == "__main__":
         print(f"[!] 数据库不存在: {DB_PATH}")
     else:
         print(f"[i] 数据库: {DB_PATH}")
+    print(f"[i] 监听: {FLASK_HOST}:{FLASK_PORT}（debug={FLASK_DEBUG}）")
 
     # 启动时自动检测：当日无快照则后台同步（不阻塞服务）
     print(f"[i] 同步检测: {sync_spot_async()['message']}")
@@ -426,12 +500,13 @@ if __name__ == "__main__":
     try:
         hostname = socket.gethostname()
         lan_ip = socket.gethostbyname(hostname)
-        print(f"[i] 电脑大屏: http://127.0.0.1:5175")
-        print(f"[i] 手机联用: http://{lan_ip}:5175 （需同一WiFi，在APP设置中填入）")
+        print(f"[i] 电脑大屏: http://127.0.0.1:{FLASK_PORT}")
+        print(f"[i] 手机联用: http://{lan_ip}:{FLASK_PORT} （需同一WiFi，在APP设置中填入）")
     except OSError:
         pass
 
-    # 延迟2秒自动打开浏览器（等待 Flask 起来）
-    threading.Timer(2, lambda: webbrowser.open("http://127.0.0.1:5175")).start()
+    # 延迟2秒自动打开浏览器（本地开发模式才自动开；服务器部署用 gunicorn 不会走这）
+    if FLASK_DEBUG or FLASK_HOST in ("127.0.0.1", "localhost"):
+        threading.Timer(2, lambda: webbrowser.open(f"http://127.0.0.1:{FLASK_PORT}")).start()
 
-    app.run(host="0.0.0.0", port=5175, debug=False)
+    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=FLASK_DEBUG)

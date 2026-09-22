@@ -88,6 +88,20 @@
         </div>
       </div>
 
+      <!-- 卖出策略 -->
+      <div class="filter-row">
+        <span class="filter-label">卖出策略</span>
+        <div class="chip-row">
+          <button
+            v-for="opt in exitStrategyOptions"
+            :key="opt.value"
+            class="chip"
+            :class="{ active: model.exitStrategy === opt.value }"
+            @click="model.exitStrategy = opt.value"
+          >{{ opt.label }}</button>
+        </div>
+      </div>
+
       <!-- 起始日期 -->
       <div class="filter-row">
         <span class="filter-label">起始日</span>
@@ -106,7 +120,7 @@
       <div v-for="m in savedModels" :key="m.id" class="saved-model" @click="loadModel(m)">
         <span class="sm-name">{{ m.name }}</span>
         <span class="sm-params">
-          {{ m.params.periods.join('/') }} · ≥{{ m.threshold }} · top{{ m.topN }} · {{ m.holdDays }}天
+          {{ m.params.periods.join('/') }} · ≥{{ m.threshold }} · top{{ m.topN }} · {{ m.holdDays }}天 · {{ exitLabel(m.exitStrategy) }}
         </span>
         <van-icon name="delete-o" class="sm-del" @click.stop="delModel(m.id)" />
       </div>
@@ -116,8 +130,11 @@
     <div v-if="running" class="section-card">
       <van-loading type="spinner" />
       <span class="prog-text">
-        {{ progress.phase === 'fetching' ? '拉取K线' : progress.phase === 'backtesting' ? '逐日回测' : '统计中' }}
-        {{ progress.done }}/{{ progress.total }}
+        <template v-if="progress.phase === 'fetching'">
+          {{ progress.cached != null ? `本地缓存 ${progress.cached} 只 / 兜底拉取 ${progress.missing} 只` : `拉取K线 ${progress.done}/${progress.total}` }}
+        </template>
+        <template v-else-if="progress.phase === 'backtesting'">逐日回测 {{ progress.done }}/{{ progress.total }}</template>
+        <template v-else>统计中</template>
       </span>
     </div>
 
@@ -207,6 +224,11 @@ const periodOptions = [
 ]
 const elementOptions = ['木', '火', '土', '金', '水']
 const marketOptions = ['全部', '沪', '深', '北交所']
+const exitStrategyOptions = [
+  { value: 'signal', label: '信号卖出' },
+  { value: 'holdDays', label: '到期卖出' },
+  { value: 'both', label: '两者结合' },
+]
 
 const model = reactive({
   id: null,
@@ -223,6 +245,7 @@ const model = reactive({
   threshold: 70,
   topN: 10,
   holdDays: 5,
+  exitStrategy: 'both',
   initialCapital: 1000000,
   startDate: getDefaultStartDate(),
 })
@@ -248,6 +271,11 @@ function toggleArr(arr, val) {
   const idx = arr.indexOf(val)
   if (idx >= 0) arr.splice(idx, 1)
   else arr.push(val)
+}
+
+function exitLabel(v) {
+  const opt = exitStrategyOptions.find((o) => o.value === v)
+  return opt ? opt.label : '两者结合'
 }
 
 function fmt(v) {

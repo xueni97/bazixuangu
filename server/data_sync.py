@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 import threading
 import time
@@ -25,7 +26,26 @@ from pathlib import Path
 import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "sequoia_v2.db"
+
+# .env 加载（可选；无 python-dotenv 时回落到系统环境变量）
+try:
+    from dotenv import load_dotenv  # type: ignore
+    _env = PROJECT_ROOT / ".env"
+    if _env.exists():
+        load_dotenv(_env)
+except ImportError:
+    pass
+
+# DB_PATH 支持 .env 覆盖：相对路径基于 PROJECT_ROOT
+_DB_ENV = os.environ.get("DB_PATH", "data/sequoia_v2.db")
+DB_PATH = Path(_DB_ENV)
+if not DB_PATH.is_absolute():
+    DB_PATH = PROJECT_ROOT / _DB_ENV
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# 并发数支持 .env 覆盖（学生服务器降速避免触发 IP 限流）
+SYNC_WORKERS_ENV = os.environ.get("SYNC_WORKERS")
+MA_WORKERS = int(SYNC_WORKERS_ENV) if SYNC_WORKERS_ENV and SYNC_WORKERS_ENV.isdigit() else 4
 
 MAX_RETRIES_PER_SOURCE = 2
 RETRY_INTERVAL = 3  # 秒
@@ -60,6 +80,12 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         "symbol TEXT PRIMARY KEY, trade_date TEXT, close REAL, high20 REAL, "
         "bars INTEGER, ma144 REAL, ma288 REAL, updated_at TEXT, "
         "source TEXT DEFAULT 'em')"
+    )
+    # 原始日K缓存：sync_ma 拉到 K 线时一并入库，/api/klines 直读此表，浏览器回测免拉网络
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS stock_kline ("
+        "symbol TEXT PRIMARY KEY, bars_json TEXT, trade_date TEXT, "
+        "bars_count INTEGER, updated_at TEXT)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sync_meta ("
@@ -304,7 +330,7 @@ def _fetch_sina() -> list[tuple]:
 
 MA_WINDOWS = (144, 288)
 MA_KLINE_LMT = 320          # 288 均线 + 20 回踩窗口 + 余量
-MA_WORKERS = 4              # 并发线程（过高会触发东财 IP 限流断连）
+# 并发线程（过高会触发东财 IP 限流断连）；已在文件头部从 .env 读取，此处保留默认值兜底
 MA_RETRY = 3                # 单源网络错误重试次数（退避递增）
 MA_RETRY_PAUSE = (0.8, 1.8, 4.0)
 # 分源限速：东财可承受较高并发；新浪/腾讯约 2 req/s 才不会被限流
@@ -567,6 +593,58 @@ def fetch_symbol_klines(symbol: str) -> list[tuple[str, float]]:
     return fetch_symbol_klines_ex(symbol)[0]
 
 
+def fetch_klines_from_db(symbol: str) -> list[list]:
+    """从 stock_kline 表读日K（[[date, close], ...]）。
+
+    供 /api/klines 直读 SQLite，浏览器访问服务器 Web 版回测时
+    直接读 cron 已拉好的 K 线，避免浏览器每票网络兜底。
+    无缓存返回空数组（上层可选 fetch_symbol_klines 兜底）。
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT bars_json FROM stock_kline WHERE symbol = ?",
+            (symbol,)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["bars_json"]:
+        return []
+    try:
+        bars = json.loads(row["bars_json"])
+        # 兼容存的是 [[date, close], ...] 或 [(date, close), ...]
+        return [[b[0], b[1]] for b in bars]
+    except (json.JSONDecodeError, IndexError, TypeError):
+        return []
+
+
+def fetch_klines_batch_from_db(symbols: list[str]) -> dict:
+    """批量读 stock_kline，返回 {symbol: [[date, close], ...]}。
+
+    用于回测候选列表批量预读（一次事务），比逐个 fetch_klines_from_db 快。
+    """
+    if not symbols:
+        return {}
+    out: dict = {}
+    conn = get_conn()
+    try:
+        # IN 子句参数上限 ~999，分块
+        CHUNK = 500
+        for i in range(0, len(symbols), CHUNK):
+            chunk = symbols[i:i + CHUNK]
+            ph = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT symbol, bars_json FROM stock_kline "
+                f"WHERE symbol IN ({ph})", chunk).fetchall()
+            for r in rows:
+                try:
+                    out[r["symbol"]] = [[b[0], b[1]] for b in json.loads(r["bars_json"])]
+                except (json.JSONDecodeError, IndexError, TypeError):
+                    pass
+    finally:
+        conn.close()
+    return out
+
+
 def compute_ma_snapshot(symbol: str, klines: list[tuple[str, float]]) -> dict | None:
     """日K (date, close) → stock_ma 行。上市不足 144 个交易日返回 None。
 
@@ -715,8 +793,8 @@ def sync_ma(force: bool = False) -> dict:
                         "message": f"均线数据已为最新（{trade_date}，{len(symbols)}只）"}
 
         def _run_round(targets, phase, workers):
-            """并发拉取一轮，返回 (新均线行, 仍失败标的)。"""
-            records, failed_syms = [], []
+            """并发拉取一轮，返回 (新均线行, 仍失败标的, 日K缓存行)。"""
+            records, failed_syms, kline_recs = [], [], []
             with _ma_lock:
                 _ma_state.update(done=0, total=len(targets))
             with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -726,6 +804,14 @@ def sync_ma(force: bool = False) -> dict:
                     sym = futures[fut]
                     try:
                         klines, source = fut.result()
+                        # 原始日K一律缓存（次新股也存，回测/扫描可调用）
+                        if klines:
+                            kline_recs.append({
+                                "symbol": sym,
+                                "bars_json": json.dumps(klines),
+                                "trade_date": klines[-1][0],
+                                "bars_count": len(klines),
+                            })
                         snap = compute_ma_snapshot(sym, klines)
                         if snap:
                             snap["source"] = source or "em"
@@ -739,34 +825,43 @@ def sync_ma(force: bool = False) -> dict:
                         n = _ma_state["done"]
                         if n % 100 == 0:
                             _ma_state["phase"] = f"{phase} {n}/{_ma_state['total']}"
-            return records, failed_syms
+            return records, failed_syms, kline_recs
 
         with _ma_lock:
             _ma_state.update(phase="拉取日K中", total=len(symbols),
                              done=skipped_have)
 
-        records, failed_syms = _run_round(todo, "拉取日K中", MA_WORKERS)
+        records, failed_syms, kline_recs = _run_round(todo, "拉取日K中", MA_WORKERS)
 
-        def _persist(batch, mark_meta: bool):
-            """把一轮结果落库（逐轮持久化，限流中断也不丢进度）。"""
-            if not batch:
+        def _persist(batch, klines_batch, mark_meta: bool):
+            """把一轮结果落库（均线 + 原始K线，逐轮持久化，限流中断也不丢进度）。"""
+            if not batch and not klines_batch:
                 return
             with _ma_lock:
-                _ma_state.update(phase=f"写库中({len(batch)}只)")
+                _ma_state.update(phase=f"写库中(均{len(batch)} K{len(klines_batch)})")
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            eff = trade_date or max(r["trade_date"] for r in batch)
+            eff = trade_date or max(r["trade_date"] for r in batch) if batch else ""
             conn = get_conn()
             try:
                 ensure_tables(conn)
                 with conn:
-                    conn.executemany(
-                        "INSERT OR REPLACE INTO stock_ma "
-                        "(symbol, trade_date, close, high20, bars, ma144, ma288, "
-                        "updated_at, source) "
-                        "VALUES (:symbol, :trade_date, :close, :high20, :bars, "
-                        ":ma144, :ma288, :updated_at, :source)",
-                        [{**r, "updated_at": now} for r in batch],
-                    )
+                    if batch:
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO stock_ma "
+                            "(symbol, trade_date, close, high20, bars, ma144, ma288, "
+                            "updated_at, source) "
+                            "VALUES (:symbol, :trade_date, :close, :high20, :bars, "
+                            ":ma144, :ma288, :updated_at, :source)",
+                            [{**r, "updated_at": now} for r in batch],
+                        )
+                    if klines_batch:
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO stock_kline "
+                            "(symbol, bars_json, trade_date, bars_count, updated_at) "
+                            "VALUES (:symbol, :bars_json, :trade_date, "
+                            ":bars_count, :updated_at)",
+                            [{**r, "updated_at": now} for r in klines_batch],
+                        )
                     if mark_meta:
                         conn.execute(
                             "INSERT OR REPLACE INTO sync_meta (key, value) "
@@ -778,7 +873,7 @@ def sync_ma(force: bool = False) -> dict:
                 conn.close()
 
         # 首轮结果先落库（含交易日 meta，扫描即可用；覆盖不全时下次自动补）
-        _persist(records, bool(records))
+        _persist(records, kline_recs, bool(records))
 
         # 限流导致的失败：长冷却后降速补拉三轮（东财单 IP 配额窗口约数分钟，
         # 次新股/退市无数据会自然残留；逐轮落库，中途无新增即收尾）
@@ -791,10 +886,11 @@ def sync_ma(force: bool = False) -> dict:
                 _ma_state["phase"] = (
                     f"冷却{wait_s}s后补拉重试（{len(still_missing)}只）")
             time.sleep(wait_s)
-            more, failed_syms = _run_round(
+            more, failed_syms, more_klines = _run_round(
                 still_missing, f"补拉重试{rnd}轮", max(2, MA_WORKERS // 2))
             records.extend(more)
-            _persist(more, False)
+            kline_recs.extend(more_klines)
+            _persist(more, more_klines, False)
 
         if not records:
             raise RuntimeError("未获取到任何有效日K（数据源全部失败/限流中，请稍后重试）")
