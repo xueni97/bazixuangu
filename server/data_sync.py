@@ -19,7 +19,7 @@ import os
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from datetime import datetime
 from pathlib import Path
 
@@ -341,7 +341,6 @@ MA_CB_COOLDOWN = 120        # 熔断冷却秒数（半开试探）
 _EM_HOSTS = (
     "push2his.eastmoney.com",
     "1.push2his.eastmoney.com",
-    "7.push2his.eastmoney.com",
 )
 _RETRY_STATUS = {429, 500, 501, 502, 503, 504}
 
@@ -488,7 +487,7 @@ def _fetch_kline_em(session: requests.Session, secid: str,
             continue
         try:
             payload = _http_get_json(
-                session, _em_kline_url(host, secid, lmt), tries=2,
+                session, _em_kline_url(host, secid, lmt), tries=1,
                 source="em")
             _cb_record("em", True)
             responded = True
@@ -844,44 +843,69 @@ def sync_ma(force: bool = False) -> dict:
             failed_syms = []
             with _ma_lock:
                 _ma_state.update(done=0, total=len(targets))
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {pool.submit(fetch_symbol_klines_ex, s): s
-                           for s in targets}
-                for fut in as_completed(futures):
-                    sym = futures[fut]
-                    try:
-                        klines, source = fut.result()
-                        # 原始日K一律缓存（次新股也存，回测/扫描可调用）
-                        if klines:
-                            rec = {
-                                "symbol": sym,
-                                "bars_json": json.dumps(klines),
-                                "trade_date": klines[-1][0],
-                                "bars_count": len(klines),
-                            }
-                            pending_k.append(rec)
-                            all_klines.append(rec)
-                        snap = compute_ma_snapshot(sym, klines)
-                        if snap:
-                            snap["source"] = source or "em"
-                            pending_r.append(snap)
-                            all_records.append(snap)
-                        else:
-                            failed_syms.append(sym)  # 次新股 <144 根，不算错误
-                    except Exception:  # noqa: BLE001
-                        failed_syms.append(sym)
-                    with _ma_lock:
-                        _ma_state["done"] += 1
-                        n = _ma_state["done"]
-                        if n % 100 == 0:
-                            _ma_state["phase"] = f"{phase} {n}/{_ma_state['total']}"
+            pool = ThreadPoolExecutor(max_workers=workers)
+            try:
+                future_to_sym = {pool.submit(fetch_symbol_klines_ex, s): s
+                                for s in targets}
+                pending = set(future_to_sym)
+                # 看门狗：3 分钟内无任何票完成 → 判定数据源全面卡死，中止本轮
+                WATCHDOG_S = 180
+                POLL_S = 30
+                stall_deadline = time.monotonic() + WATCHDOG_S
+                while pending:
+                    done, pending = wait(pending, timeout=POLL_S,
+                                         return_when=FIRST_COMPLETED)
+                    if not done:
+                        if time.monotonic() >= stall_deadline:
+                            stalled = [future_to_sym[f] for f in pending]
+                            preview = ",".join(stalled[:8])
                             print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
-                                  f"{phase} {n}/{_ma_state['total']}", flush=True)
-                        if n % PERSIST_EVERY == 0:
-                            _persist(pending_r, pending_k, False)
-                            print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
-                                  f"已落库 {n}/{_ma_state['total']} 只", flush=True)
-                            pending_r, pending_k = [], []
+                                  f"看门狗触发：{len(stalled)} 只票 {WATCHDOG_S}s "
+                                  f"无进展，疑似数据源断连/限流。中止本轮"
+                                  f"（已落库的不丢，下次增量补）。"
+                                  f"卡住标的：{preview}"
+                                  f"{'...' if len(stalled) > 8 else ''}",
+                                  flush=True)
+                            break
+                        continue
+                    stall_deadline = time.monotonic() + WATCHDOG_S
+                    for fut in done:
+                        sym = future_to_sym[fut]
+                        try:
+                            klines, source = fut.result()
+                            # 原始日K一律缓存（次新股也存，回测/扫描可调用）
+                            if klines:
+                                rec = {
+                                    "symbol": sym,
+                                    "bars_json": json.dumps(klines),
+                                    "trade_date": klines[-1][0],
+                                    "bars_count": len(klines),
+                                }
+                                pending_k.append(rec)
+                                all_klines.append(rec)
+                            snap = compute_ma_snapshot(sym, klines)
+                            if snap:
+                                snap["source"] = source or "em"
+                                pending_r.append(snap)
+                                all_records.append(snap)
+                            else:
+                                failed_syms.append(sym)  # 次新股 <144 根，不算错误
+                        except Exception:  # noqa: BLE001
+                            failed_syms.append(sym)
+                        with _ma_lock:
+                            _ma_state["done"] += 1
+                            n = _ma_state["done"]
+                            if n % 100 == 0:
+                                _ma_state["phase"] = f"{phase} {n}/{_ma_state['total']}"
+                                print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
+                                      f"{phase} {n}/{_ma_state['total']}", flush=True)
+                            if n % PERSIST_EVERY == 0:
+                                _persist(pending_r, pending_k, False)
+                                print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
+                                      f"已落库 {n}/{_ma_state['total']} 只", flush=True)
+                                pending_r, pending_k = [], []
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
             if pending_r or pending_k:
                 _persist(pending_r, pending_k, False)
             return all_records, failed_syms, all_klines

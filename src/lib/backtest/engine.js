@@ -124,6 +124,12 @@ export async function runBacktest(model, startDate, onProgress = null) {
   const progress = (phase, done, total) => {
     if (onProgress) onProgress({ phase, done, total })
   }
+  const logs = []
+  const log = (msg) => {
+    const entry = `[${new Date().toLocaleTimeString()}] ${msg}`
+    logs.push(entry)
+    if (onProgress) onProgress({ phase: 'logging', log: entry })
+  }
 
   // ── 阶段1：预拉K线 ──
   // 三种数据源自动选择（构建期注入 VITE_API_BASE 决定）：
@@ -239,6 +245,8 @@ export async function runBacktest(model, startDate, onProgress = null) {
   if (onProgress) {
     onProgress({ phase: 'fetching', done: candidates.length, total: candidates.length, cached: cachedCount, missing: missing.length })
   }
+  log(`阶段1完成：候选 ${candidates.length} 只，有效K线 ${klineMap.size} 只` +
+      (cachedCount != null ? `（缓存 ${cachedCount} / 兜底 ${missing.length}）` : ''))
 
   // 过滤掉K线不足的票
   const validCandidates = candidates.filter((c) => klineMap.has(c.symbol))
@@ -248,6 +256,7 @@ export async function runBacktest(model, startDate, onProgress = null) {
   if (!calendar.length) {
     return makeEmptyResult(model, startDate, '交易日历为空（起始日期过早或K线不足）')
   }
+  log(`交易日历 ${calendar.length} 日（${calendar[0]} → ${calendar[calendar.length - 1]}）`)
 
   // 预缓存取象
   const imgCache = new Map()
@@ -282,22 +291,25 @@ export async function runBacktest(model, startDate, onProgress = null) {
     // holdDays: 仅按持仓天数到期卖出，忽略信号
     // both: 两者任一触发即卖（取早）
     const exitStrategy = model.exitStrategy || 'both'
+    let soldSignal = 0, soldExpired = 0
     if ((exitStrategy === 'signal' || exitStrategy === 'both')
         && ['卖出', '减仓'].includes(signal.action)) {
       const sells = sellAll(pf, closeOf, dateStr, 'signal')
       trades.push(...sells)
+      soldSignal = sells.length
     }
     if (exitStrategy === 'holdDays' || exitStrategy === 'both') {
       const expired = [...pf.positions.values()].filter((p) => p.holdDays >= model.holdDays)
       for (const p of expired) {
         const t = sell(pf, p.symbol, closeOf(p.symbol), dateStr, 'expired')
-        if (t) trades.push(t)
+        if (t) { trades.push(t); soldExpired++ }
       }
     }
 
     tickHoldDays(pf)
 
     // 后买
+    let boughtCount = 0
     if (['买入', '轻仓试探'].includes(signal.action)) {
       const periodData = YuanhaiDecisionModel.periodAnalyses(dt)
       const picks = historicalScan(model, validCandidates, klineMap, imgCache, periodData, dt)
@@ -310,7 +322,16 @@ export async function runBacktest(model, startDate, onProgress = null) {
         for (const p of picks) {
           buy(pf, { ...p, date: dateStr }, budget)
         }
+        boughtCount = picks.length
       }
+    }
+    // 仅记录有交易的日子，避免日志爆炸
+    if (soldSignal || soldExpired || boughtCount) {
+      log(`${dateStr} 信号=${signal.action}` +
+          (soldSignal ? ` 信号卖出${soldSignal}` : '') +
+          (soldExpired ? ` 到期卖出${soldExpired}` : '') +
+          (boughtCount ? ` 买入${boughtCount}只` : '') +
+          ` 持仓${pf.positions.size} 现金${Math.round(pf.cash)}`)
     }
 
     // 记录净值
@@ -326,6 +347,9 @@ export async function runBacktest(model, startDate, onProgress = null) {
   const weeklyCurve = aggregateByPeriod(equityCurve, 'week')
   const monthlyCurve = aggregateByPeriod(equityCurve, 'month')
   progress('charting', 1, 1)
+  log(`回测完成：总收益 ${stats.totalReturn}% 年化 ${stats.annualizedReturn}%` +
+      ` 胜率 ${stats.winRate ?? '—'}% 最大回撤 ${stats.maxDrawdown}%` +
+      ` 交易 ${stats.tradeCount} 笔 候选 ${validCandidates.length} 只`)
 
   return {
     modelId: model.id || model.name,
@@ -333,6 +357,7 @@ export async function runBacktest(model, startDate, onProgress = null) {
     startDate,
     endDate: calendar[calendar.length - 1],
     status: 'done',
+    logs,
     trades,
     equityCurve,
     stats,
