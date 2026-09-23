@@ -19,11 +19,19 @@ import os
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
+
+# baostock 主源（沪深，官方稳定通道；未安装时降级到东财三主机）
+try:
+    import baostock as bs
+    _BS_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    bs = None
+    _BS_AVAILABLE = False
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # 仓库根（bazixuangu/）
 
@@ -341,7 +349,6 @@ MA_CB_COOLDOWN = 120        # 熔断冷却秒数（半开试探）
 _EM_HOSTS = (
     "push2his.eastmoney.com",
     "1.push2his.eastmoney.com",
-    "7.push2his.eastmoney.com",
 )
 _RETRY_STATUS = {429, 500, 501, 502, 503, 504}
 
@@ -407,6 +414,80 @@ def _http_session() -> requests.Session:
         s.headers.update(_UA)
         _tls.session = s
     return _tls.session
+
+
+# ── baostock 主源（沪深，官方稳定通道；非线程安全，全局串行）──
+_bs_lock = threading.Lock()
+_bs_logged_in = False
+
+
+def _bs_ensure_login() -> None:
+    """baostock 全局 login（模块级单 session，非线程安全）。"""
+    global _bs_logged_in
+    if not _BS_AVAILABLE:
+        return
+    with _bs_lock:
+        if _bs_logged_in:
+            return
+        lg = bs.login()
+        if lg.error_code != "0":
+            raise RuntimeError(f"baostock login 失败：{lg.error_msg}")
+        _bs_logged_in = True
+
+
+def _bs_logout() -> None:
+    """sync_ma 结束时显式 logout，避免连接泄漏。"""
+    global _bs_logged_in
+    if not _BS_AVAILABLE or not _bs_logged_in:
+        return
+    with _bs_lock:
+        try:
+            bs.logout()
+        except Exception:  # noqa: BLE001
+            pass
+        _bs_logged_in = False
+
+
+def _bs_code(symbol: str) -> str | None:
+    """baostock 代码：60/68/90→sh.，00/20/30→sz.，北交所(4/8/9开头)→None 不支持。"""
+    if symbol.startswith(("60", "68", "90")):
+        return "sh." + symbol
+    if symbol.startswith(("00", "20", "30")):
+        return "sz." + symbol
+    return None
+
+
+def _fetch_kline_baostock(symbol: str) -> list[tuple[str, float]] | None:
+    """baostock 前复权日K（沪深 only；北交所返 None 走 fallback）。
+
+    baostock 非线程安全，query 在 _bs_lock 内串行执行。
+    一次 query 返回全部历史 K 线（不分页），MA_KLINE_LMT*3 自然日保险。
+    """
+    if not _BS_AVAILABLE:
+        return None
+    code = _bs_code(symbol)
+    if not code:
+        return None  # 北交所，baostock 不支持
+    _bs_ensure_login()
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=MA_KLINE_LMT * 3)).strftime("%Y-%m-%d")
+    with _bs_lock:  # baostock 全局 session 非线程安全，query 必须串行
+        rs = bs.query_history_k_data_plus(
+            code, "date,close",
+            start_date=start, end_date=end,
+            frequency="d", adjustflag="2",  # 2=前复权
+        )
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock query {code} 失败：{rs.error_msg}")
+        rows = []
+        while rs.next():
+            r = rs.get_row_data()
+            if len(r) >= 2 and r[0] and r[1]:
+                try:
+                    rows.append((r[0], float(r[1])))
+                except ValueError:
+                    pass
+        return rows
 
 
 def _em_secid(symbol: str) -> str:
@@ -488,7 +569,7 @@ def _fetch_kline_em(session: requests.Session, secid: str,
             continue
         try:
             payload = _http_get_json(
-                session, _em_kline_url(host, secid, lmt), tries=2,
+                session, _em_kline_url(host, secid, lmt), tries=1,
                 source="em")
             _cb_record("em", True)
             responded = True
@@ -557,11 +638,19 @@ def _fetch_kline_sina(session: requests.Session, code: str,
 
 
 def fetch_symbol_klines_ex(symbol: str) -> tuple[list[tuple[str, float]], str]:
-    """日K兜底链：东财(前复权,全市场) → 腾讯(前复权,沪深) → 新浪(不复权,含北交所)。
+    """日K主源链：baostock(沪深,官方稳定) → 东财(全市场) → 腾讯(沪深) → 新浪(含北交所)。
 
-    返回 (klines, source)；source ∈ em/tx/sina；全失败为 ([], "")。
-    熔断中的源直接跳过，不在单只标的上烧重试等待。
+    返回 (klines, source)；source ∈ baostock/em/tx/sina；全失败为 ([], "")。
+    baostock 不支持北交所(4/8/9开头)，自动跳过到东财 fallback。
     """
+    # 1. baostock 主源（沪深 only，官方稳定通道，不限流不卡死）
+    try:
+        rows = _fetch_kline_baostock(symbol)
+        if rows:
+            return rows, "baostock"
+    except Exception:  # noqa: BLE001
+        pass
+    # 2. 东财 fallback（全市场含北交所，镜像轮换 + 退避）
     session = _http_session()
     try:
         rows = _fetch_kline_em(session, _em_secid(symbol))
@@ -844,44 +933,69 @@ def sync_ma(force: bool = False) -> dict:
             failed_syms = []
             with _ma_lock:
                 _ma_state.update(done=0, total=len(targets))
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {pool.submit(fetch_symbol_klines_ex, s): s
-                           for s in targets}
-                for fut in as_completed(futures):
-                    sym = futures[fut]
-                    try:
-                        klines, source = fut.result()
-                        # 原始日K一律缓存（次新股也存，回测/扫描可调用）
-                        if klines:
-                            rec = {
-                                "symbol": sym,
-                                "bars_json": json.dumps(klines),
-                                "trade_date": klines[-1][0],
-                                "bars_count": len(klines),
-                            }
-                            pending_k.append(rec)
-                            all_klines.append(rec)
-                        snap = compute_ma_snapshot(sym, klines)
-                        if snap:
-                            snap["source"] = source or "em"
-                            pending_r.append(snap)
-                            all_records.append(snap)
-                        else:
-                            failed_syms.append(sym)  # 次新股 <144 根，不算错误
-                    except Exception:  # noqa: BLE001
-                        failed_syms.append(sym)
-                    with _ma_lock:
-                        _ma_state["done"] += 1
-                        n = _ma_state["done"]
-                        if n % 100 == 0:
-                            _ma_state["phase"] = f"{phase} {n}/{_ma_state['total']}"
+            pool = ThreadPoolExecutor(max_workers=workers)
+            try:
+                future_to_sym = {pool.submit(fetch_symbol_klines_ex, s): s
+                                for s in targets}
+                pending = set(future_to_sym)
+                # 看门狗：3 分钟内无任何票完成 → 判定数据源全面卡死，中止本轮
+                WATCHDOG_S = 180
+                POLL_S = 30
+                stall_deadline = time.monotonic() + WATCHDOG_S
+                while pending:
+                    done, pending = wait(pending, timeout=POLL_S,
+                                         return_when=FIRST_COMPLETED)
+                    if not done:
+                        if time.monotonic() >= stall_deadline:
+                            stalled = [future_to_sym[f] for f in pending]
+                            preview = ",".join(stalled[:8])
                             print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
-                                  f"{phase} {n}/{_ma_state['total']}", flush=True)
-                        if n % PERSIST_EVERY == 0:
-                            _persist(pending_r, pending_k, False)
-                            print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
-                                  f"已落库 {n}/{_ma_state['total']} 只", flush=True)
-                            pending_r, pending_k = [], []
+                                  f"看门狗触发：{len(stalled)} 只票 {WATCHDOG_S}s "
+                                  f"无进展，疑似数据源断连/限流。中止本轮"
+                                  f"（已落库的不丢，下次增量补）。"
+                                  f"卡住标的：{preview}"
+                                  f"{'...' if len(stalled) > 8 else ''}",
+                                  flush=True)
+                            break
+                        continue
+                    stall_deadline = time.monotonic() + WATCHDOG_S
+                    for fut in done:
+                        sym = future_to_sym[fut]
+                        try:
+                            klines, source = fut.result()
+                            # 原始日K一律缓存（次新股也存，回测/扫描可调用）
+                            if klines:
+                                rec = {
+                                    "symbol": sym,
+                                    "bars_json": json.dumps(klines),
+                                    "trade_date": klines[-1][0],
+                                    "bars_count": len(klines),
+                                }
+                                pending_k.append(rec)
+                                all_klines.append(rec)
+                            snap = compute_ma_snapshot(sym, klines)
+                            if snap:
+                                snap["source"] = source or "em"
+                                pending_r.append(snap)
+                                all_records.append(snap)
+                            else:
+                                failed_syms.append(sym)  # 次新股 <144 根，不算错误
+                        except Exception:  # noqa: BLE001
+                            failed_syms.append(sym)
+                        with _ma_lock:
+                            _ma_state["done"] += 1
+                            n = _ma_state["done"]
+                            if n % 100 == 0:
+                                _ma_state["phase"] = f"{phase} {n}/{_ma_state['total']}"
+                                print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
+                                      f"{phase} {n}/{_ma_state['total']}", flush=True)
+                            if n % PERSIST_EVERY == 0:
+                                _persist(pending_r, pending_k, False)
+                                print(f"[{datetime.now():%H:%M:%S}] [sync_ma] "
+                                      f"已落库 {n}/{_ma_state['total']} 只", flush=True)
+                                pending_r, pending_k = [], []
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
             if pending_r or pending_k:
                 _persist(pending_r, pending_k, False)
             return all_records, failed_syms, all_klines
@@ -942,6 +1056,8 @@ def sync_ma(force: bool = False) -> dict:
             _ma_state.update(status="failed", phase="", last_error=str(e),
                              finished_at=datetime.now().strftime("%H:%M:%S"))
         return {"ok": False, "message": f"均线同步失败：{e}"}
+    finally:
+        _bs_logout()
 
 
 def sync_ma_async(force: bool = False) -> dict:

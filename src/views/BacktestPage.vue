@@ -138,8 +138,24 @@
       </span>
     </div>
 
+    <!-- 实时日志预览（运行中） -->
+    <div v-if="running && logs.length" class="section-card">
+      <div class="log-title">实时日志（最近 5 条）</div>
+      <pre class="log-box">{{ logs.slice(-5).join('\n') }}</pre>
+    </div>
+
     <!-- 回测结果 -->
     <template v-if="result && result.status !== 'empty'">
+      <!-- 回测日志（可折叠） -->
+      <div v-if="result.logs && result.logs.length" class="section-card">
+        <van-cell
+          :title="`回测日志（${result.logs.length} 条）`"
+          is-link
+          :arrow-direction="showLogs ? 'up' : 'down'"
+          @click="showLogs = !showLogs"
+        />
+        <pre v-if="showLogs" class="log-box full">{{ result.logs.join('\n') }}</pre>
+      </div>
       <!-- 统计卡 -->
       <div class="section-card">
         <div class="card-title">回测统计</div>
@@ -254,6 +270,8 @@ const savedModels = ref([])
 const running = ref(false)
 const progress = ref({ phase: '', done: 0, total: 0 })
 const result = ref(null)
+const logs = ref([])
+const showLogs = ref(false)
 const chartTab = ref(0)
 const showTrades = ref(false)
 const dailyCanvas = ref(null)
@@ -330,9 +348,11 @@ async function onRun() {
   if (!model.params.periods.length) { showToast('请至少选一个周期'); return }
   running.value = true
   result.value = null
+  logs.value = []
   try {
     result.value = await runBacktest(model, model.startDate, (p) => {
       progress.value = p
+      if (p.phase === 'logging' && p.log) logs.value.push(p.log)
     })
     if (result.value.status !== 'empty') {
       await nextTick()
@@ -439,6 +459,14 @@ onMounted(() => {
 .sm-del { color: #f44336; }
 
 .prog-text { margin-left: 8px; font-size: 13px; color: var(--text-secondary); }
+.log-title { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+.log-box {
+  margin: 0; padding: 8px 10px; background: var(--bg-card, #f5f5f5);
+  border-radius: 6px; font-size: 11px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow-y: auto;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.log-box.full { max-height: 400px; }
 
 .stats-grid {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
