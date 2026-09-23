@@ -126,7 +126,8 @@ def test_fetch_chain_fallback(temp_db, monkeypatch):
     monkeypatch.setattr(data_sync.time, "sleep", lambda s: None)
 
     rows, source = data_sync._fetch_snapshot()
-    assert source == "sina"
+    # 仅 1 条 < 完整性门槛 4000：所有源都不完整，返回最完整一份并标 -partial
+    assert source == "sina-partial"
     assert rows == sina_rows
 
 
@@ -468,8 +469,10 @@ def test_sync_ma_pipeline(temp_db, monkeypatch):
     klines = [(f"2025-{i // 30 + 1:02d}-{i % 28 + 1:02d}", 10.0) for i in range(300)]
     klines[-1] = ("2026-09-12", 10.0)
     monkeypatch.setattr(data_sync, "_latest_trade_date", lambda s: "2026-09-12")
+    # 强制全部标的走线程池路径（沪深票生产环境走 _bs_worker 子进程）
+    monkeypatch.setattr(data_sync, "_bs_code", lambda s: None)
     monkeypatch.setattr(data_sync, "fetch_symbol_klines_ex",
-                        lambda sym: (list(klines), "em"))
+                        lambda sym, use_baostock=True: (list(klines), "em"))
 
     result = data_sync.sync_ma(force=True)
     assert result["ok"] is True and result["count"] == 5
@@ -488,6 +491,51 @@ def test_sync_ma_pipeline(temp_db, monkeypatch):
     # 同一交易日再跑 → 跳过
     again = data_sync.sync_ma()
     assert again.get("skipped") is True
+
+
+def test_snapshot_prefers_complete_over_partial(temp_db, monkeypatch):
+    """东财仅 2960 只（不完整）→ 继续切源；sina 5000 只达标则采用 sina。"""
+    em_rows = [(f"6{i:05d}", "甲票", 1.0, 0.0, "沪", "t") for i in range(2960)]
+    sina_rows = [(f"0{i:05d}", "乙票", 1.0, 0.0, "深", "t") for i in range(5000)]
+
+    def tx_down():
+        raise RuntimeError("tx down")
+
+    monkeypatch.setattr(data_sync, "_fetch_eastmoney", lambda: em_rows)
+    monkeypatch.setattr(data_sync, "_fetch_tencent", tx_down)
+    monkeypatch.setattr(data_sync, "_fetch_sina", lambda: sina_rows)
+    monkeypatch.setattr(data_sync.time, "sleep", lambda s: None)
+
+    rows, source = data_sync._fetch_snapshot()
+    assert source == "sina"
+    assert len(rows) == 5000
+
+
+def test_fetch_ex_skips_baostock(monkeypatch):
+    """use_baostock=False 时不触 baostock，直接走东财链。"""
+    called = {"bs": False}
+
+    def _bs(sym):
+        called["bs"] = True
+        return []
+
+    monkeypatch.setattr(data_sync, "_fetch_kline_baostock", _bs)
+    monkeypatch.setattr(data_sync, "_fetch_kline_em",
+                        lambda session, secid: [("2026-09-22", 10.0)])
+
+    rows, source = data_sync.fetch_symbol_klines_ex("600519", use_baostock=False)
+    assert source == "em" and rows
+    assert called["bs"] is False
+
+
+def test_bs_worker_code_classification():
+    """_bs_worker.bs_code：沪深代码分类，北交所返 None。"""
+    import _bs_worker  # noqa: E402 - server 目录已在 sys.path
+    assert _bs_worker.bs_code("600519") == "sh.600519"
+    assert _bs_worker.bs_code("688981") == "sh.688981"
+    assert _bs_worker.bs_code("000001") == "sz.000001"
+    assert _bs_worker.bs_code("300750") == "sz.300750"
+    assert _bs_worker.bs_code("830799") is None  # 北交所
 
 
 def test_index_spa_fallback(client):

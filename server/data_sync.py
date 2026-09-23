@@ -17,6 +17,8 @@ import json
 import math
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
@@ -637,19 +639,24 @@ def _fetch_kline_sina(session: requests.Session, code: str,
     return _parse_sina_klines(payload)
 
 
-def fetch_symbol_klines_ex(symbol: str) -> tuple[list[tuple[str, float]], str]:
+def fetch_symbol_klines_ex(symbol: str, use_baostock: bool = True
+                           ) -> tuple[list[tuple[str, float]], str]:
     """日K主源链：baostock(沪深,官方稳定) → 东财(全市场) → 腾讯(沪深) → 新浪(含北交所)。
 
     返回 (klines, source)；source ∈ baostock/em/tx/sina；全失败为 ([], "")。
     baostock 不支持北交所(4/8/9开头)，自动跳过到东财 fallback。
+
+    use_baostock=False：跳过 baostock 直接走东财链。sync_ma 主进程对北交所
+    补拉时使用（沪深票的 baostock 抓取在 _bs_worker 子进程内完成）。
     """
     # 1. baostock 主源（沪深 only，官方稳定通道，不限流不卡死）
-    try:
-        rows = _fetch_kline_baostock(symbol)
-        if rows:
-            return rows, "baostock"
-    except Exception:  # noqa: BLE001
-        pass
+    if use_baostock:
+        try:
+            rows = _fetch_kline_baostock(symbol)
+            if rows:
+                return rows, "baostock"
+        except Exception:  # noqa: BLE001
+            pass
     # 2. 东财 fallback（全市场含北交所，镜像轮换 + 退避）
     session = _http_session()
     try:
@@ -922,6 +929,82 @@ def sync_ma(force: bool = False) -> dict:
             finally:
                 conn.close()
 
+        # ── 沪深：baostock 子进程分批（进程级隔离；socket 卡死靠超时杀进程）──
+        BS_BATCH = 40
+        BS_BATCH_TIMEOUT = 150
+        _BS_WORKER = Path(__file__).with_name("_bs_worker.py")
+
+        def _run_bs_subprocess(batch):
+            """起子进程跑一批 baostock，返回 {symbol: [(date, close), ...]}。
+
+            超时/解析失败的票不在返回 dict 中；主进程保证不被阻塞。
+            """
+            payload = json.dumps({"symbols": batch})
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(_BS_WORKER)],
+                    input=payload, capture_output=True, text=True,
+                    timeout=BS_BATCH_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                print(f"[{datetime.now():%H:%M:%S}] [sync_ma] baostock 子进程 "
+                      f"{BS_BATCH_TIMEOUT}s 超时，整批 {len(batch)} 只标记失败"
+                      f"（下次增量补），继续下一批", flush=True)
+                return {}
+            got = {}
+            for line in proc.stdout.splitlines():
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if msg.get("ok") and msg.get("rows"):
+                    got[msg["symbol"]] = [tuple(r) for r in msg["rows"]]
+            return got
+
+        def _bs_pull(targets, phase):
+            """分批起子进程拉 baostock，逐批落库。
+
+            返回 (均线行, 失败标的, K线行)。
+            """
+            records, klines_recs, failed = [], [], []
+            with _ma_lock:
+                _ma_state.update(done=0, total=len(targets))
+            done_n = 0
+            for i in range(0, len(targets), BS_BATCH):
+                batch = targets[i:i + BS_BATCH]
+                got = _run_bs_subprocess(batch)
+                pending_r, pending_k = [], []
+                for sym in batch:
+                    klines = got.get(sym)
+                    if not klines:
+                        failed.append(sym)
+                        continue
+                    rec = {
+                        "symbol": sym,
+                        "bars_json": json.dumps(klines),
+                        "trade_date": klines[-1][0],
+                        "bars_count": len(klines),
+                    }
+                    pending_k.append(rec)
+                    klines_recs.append(rec)
+                    snap = compute_ma_snapshot(sym, klines)
+                    if snap:
+                        snap["source"] = "baostock"
+                        pending_r.append(snap)
+                        records.append(snap)
+                    else:
+                        failed.append(sym)  # 次新股 <144 根
+                if pending_r or pending_k:
+                    _persist(pending_r, pending_k, False)
+                done_n += len(batch)
+                with _ma_lock:
+                    _ma_state["done"] = done_n
+                    _ma_state["phase"] = f"{phase} {done_n}/{len(targets)}"
+                print(f"[{datetime.now():%H:%M:%S}] [sync_ma] {phase} "
+                      f"{done_n}/{len(targets)}"
+                      f"（本批成功 {len(got)}/{len(batch)}）", flush=True)
+            return records, failed, klines_recs
+
         def _run_round(targets, phase, workers):
             """并发拉取一轮，每 PERSIST_EVERY 只分批落库（进度可见/中断少丢）。
 
@@ -935,7 +1018,8 @@ def sync_ma(force: bool = False) -> dict:
                 _ma_state.update(done=0, total=len(targets))
             pool = ThreadPoolExecutor(max_workers=workers)
             try:
-                future_to_sym = {pool.submit(fetch_symbol_klines_ex, s): s
+                # 北交所票走东财/新浪链（use_baostock=False；baostock 不支持北交所）
+                future_to_sym = {pool.submit(fetch_symbol_klines_ex, s, False): s
                                 for s in targets}
                 pending = set(future_to_sym)
                 # 看门狗：3 分钟内无任何票完成 → 判定数据源全面卡死，中止本轮
@@ -1000,27 +1084,49 @@ def sync_ma(force: bool = False) -> dict:
                 _persist(pending_r, pending_k, False)
             return all_records, failed_syms, all_klines
 
+        # 分组：沪深票走 baostock 子进程（稳定）；北交所走东财/新浪线程池
+        bs_todo = [s for s in todo if _bs_code(s)]
+        em_todo = [s for s in todo if not _bs_code(s)]
+
         with _ma_lock:
-            _ma_state.update(phase="拉取日K中", total=len(symbols),
-                             done=skipped_have)
+            _ma_state.update(phase="拉取日K中", total=len(todo), done=0)
 
-        records, failed_syms, kline_recs = _run_round(todo, "拉取日K中", MA_WORKERS)
+        records, kline_recs = [], []
+        bs_failed: list[str] = []
+        if bs_todo:
+            r, f, k = _bs_pull(bs_todo, "拉取日K(baostock)")
+            records.extend(r)
+            bs_failed = f
+            kline_recs.extend(k)
+        if em_todo:
+            r, f, k = _run_round(em_todo, "拉取日K(北交所)", MA_WORKERS)
+            records.extend(r)
+            kline_recs.extend(k)
+            em_failed = f
+        else:
+            em_failed = []
 
-        # 限流导致的失败：长冷却后降速补拉三轮（东财单 IP 配额窗口约数分钟，
-        # 次新股/退市无数据会自然残留；逐轮落库，中途无新增即收尾）
-        for rnd, wait_s in ((1, 120), (2, 300), (3, 600)):
-            got = {r["symbol"] for r in records}
-            still_missing = [s for s in failed_syms if s not in got]
-            if not still_missing:
-                break
+        # 补拉：baostock 失败票子进程重试一轮（全新 login/连接，不做长冷却，
+        # 因为卡死的连接随上一个子进程已被整体杀掉）；
+        # 北交所失败票冷却 120s 后降速补一轮（东财限流窗口）
+        if bs_failed:
             with _ma_lock:
-                _ma_state["phase"] = (
-                    f"冷却{wait_s}s后补拉重试（{len(still_missing)}只）")
-            time.sleep(wait_s)
-            more, failed_syms, more_klines = _run_round(
-                still_missing, f"补拉重试{rnd}轮", max(2, MA_WORKERS // 2))
-            records.extend(more)
-            kline_recs.extend(more_klines)
+                _ma_state["phase"] = f"baostock 补拉（{len(bs_failed)}只）"
+            r, still_f, k = _bs_pull(bs_failed, "补拉(baostock)")
+            records.extend(r)
+            kline_recs.extend(k)
+            bs_failed = still_f
+        if em_failed:
+            with _ma_lock:
+                _ma_state["phase"] = f"冷却120s后补拉北交所（{len(em_failed)}只）"
+            time.sleep(120)
+            r, still_f, k = _run_round(
+                em_failed, "补拉(北交所)", max(2, MA_WORKERS // 2))
+            records.extend(r)
+            kline_recs.extend(k)
+            em_failed = still_f
+
+        failed_syms = bs_failed + em_failed
 
         if not records:
             raise RuntimeError("未获取到任何有效日K（数据源全部失败/限流中，请稍后重试）")
@@ -1101,7 +1207,12 @@ def _fetch_snapshot() -> tuple[list[tuple], str]:
     """多源 fallback 链：东财delay → 腾讯 → 新浪。
 
     返回 (rows, source_name)。全部失败抛出最后异常。
+    完整性校验：A 股全市场 5500+ 只，返回不足 MIN_SPOT_ROWS 只的视为该源
+    不完整（盘中 sina 分页漏数常见），继续重试/切源，不接受半成品静默通过。
+    所有源均不完整时，返回条数最多的一份并把 source 标为 "...-partial"，
+    保证至少部分标的可拉，由调用结果显式告知。
     """
+    MIN_SPOT_ROWS = 4000
     conn = get_conn()
     try:
         ensure_tables(conn)
@@ -1114,19 +1225,30 @@ def _fetch_snapshot() -> tuple[list[tuple], str]:
         conn.close()
 
     last_err = None
+    best: tuple[list[tuple], str] | None = None
     for source_name, fetch in sources:
         for attempt in range(MAX_RETRIES_PER_SOURCE + 1):
             try:
                 rows = fetch()
-                if rows:
+                if rows and len(rows) >= MIN_SPOT_ROWS:
                     return rows, source_name
-                last_err = RuntimeError(f"{source_name} 源返回空数据")
+                if rows:
+                    last_err = RuntimeError(
+                        f"{source_name} 源数据不完整：仅{len(rows)}只"
+                        f"（<{MIN_SPOT_ROWS}）")
+                    if best is None or len(rows) > len(best[0]):
+                        best = (rows, source_name)
+                else:
+                    last_err = RuntimeError(f"{source_name} 源返回空数据")
             except Exception as e:  # noqa: BLE001 - 网络源需逐个兜底
                 last_err = e
             if attempt < MAX_RETRIES_PER_SOURCE:
                 time.sleep(RETRY_INTERVAL)
         with _lock:
-            _state["phase"] = f"{source_name} 源不可用，切换下一源"
+            _state["phase"] = f"{source_name} 源不可用/不完整，切换下一源"
+    if best is not None:
+        # 所有源都不完整：返回最完整的一份，source 加 -partial 显式标注
+        return best[0], best[1] + "-partial"
     raise last_err or RuntimeError("所有数据源均失败")
 
 
