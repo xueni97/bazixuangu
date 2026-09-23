@@ -171,6 +171,14 @@ export async function runBacktest(model, startDate, onProgress = null) {
     }
     // 缺失的单只兜底
     missing = candidates.filter((c) => !klineMap.has(c.symbol))
+    // 数据严重不全（>30% 缺失）：直接提示先补数据，避免逐只兜底几十分钟
+    if (missing.length > 500 && missing.length / candidates.length > 0.3) {
+      return makeEmptyResult(
+        model, startDate,
+        `服务器 K 线缓存仅 ${klineMap.size}/${candidates.length} 只，` +
+        `${missing.length} 只缺失需逐只兜底（太慢）。请先在服务器跑：` +
+        ` nohup .venv/bin/python server/sync_once.py 拉全市场K线后再回测。`)
+    }
     if (missing.length) {
       let mcursor = 0
       const mpull = async () => {
