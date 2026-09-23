@@ -180,7 +180,22 @@ curl -X POST http://127.0.0.1:5000/api/sync/ma
 curl -s http://127.0.0.1:5000/api/sync/status
 ```
 
-### 3.3 数据没更新的排查顺序
+### 3.3 数据源机制与日志解读
+
+- **沪深票（~5700 只）走 baostock 子进程**：每 40 只票起一个 `_bs_worker.py`
+  子进程，单批 150 秒超时由系统直接杀进程——主进程永远不会被网络阻塞
+  卡死；卡住的批次标记失败，下次 sync 自动增量补
+- **北交所票（~200 只，baostock 不支持）** 走东财/新浪线程池兜底
+- 日志关键行：
+  - `拉取日K(baostock) 1200/2760（本批成功 40/40）`：子进程分批正常推进
+  - `baostock 子进程 150s 超时，整批 40 只标记失败`：该批网络卡死，
+    不影响整体任务，会自动补拉一轮，仍失败等次日 cron
+  - spot 同步结果带 `-partial`（如 `同步成功(sina-partial)，共2960只`）：
+    所有源数据都不完整（<4000 只），当天只入池部分标的，网络恢复后重跑
+- baostock 本身异常时（login 失败等），子进程输出全失败，主进程自动
+  重试；服务器首次部署需 `.venv/bin/pip install baostock`
+
+### 3.4 数据没更新的排查顺序
 
 1. `tail logs/sync.log` — cron 是否执行、有无报错
 2. `crontab -l` — 任务还在不在
@@ -215,7 +230,121 @@ du -sh data/*.db logs/
 
 ---
 
-## 5. 常见故障排查
+## 5. 代理配置（GitHub 访问）
+
+国内云服务器直连 GitHub（github.com:443）会超时。两种方案。
+
+### 5.1 临时方案：SSH 反向隧道（Windows 在线时，5 分钟可用）
+
+把 Windows 本地 Clash 端口转发到腾讯云，无需在服务器装代理。适合临时拉代码。
+
+**Windows PowerShell**（保持窗口开着，关了隧道断）：
+
+```powershell
+# 假设 Windows Clash 监听 127.0.0.1:7897（按你的实际端口改）
+ssh -R 7897:127.0.0.1:7897 ubuntu@你的腾讯云IP
+```
+
+**腾讯云另开一个 SSH 终端**：
+
+```bash
+# 配置 git 走代理
+git config --global http.proxy http://127.0.0.1:7897
+git config --global https.proxy http://127.0.0.1:7897
+
+# 验证（200 即通）
+curl -x http://127.0.0.1:7897 -sI https://github.com
+
+# 拉代码
+cd /home/ubuntu/yanfwu/bazixuangu && git pull
+```
+
+取消代理：
+
+```bash
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+```
+
+### 5.2 长期方案：mihomo 本地常驻（推荐，不依赖 Windows）
+
+腾讯云本地跑 mihomo（Clash Meta 开源版），复用 Windows 的订阅配置，开机自启。适合长期开发。
+
+**步骤 1：下载 mihomo**（用 5.1 的临时隧道，或 ghproxy 镜像）
+
+```bash
+# 方式 A：用 5.1 已配好的临时代理下载
+curl -x http://127.0.0.1:7897 -L -o /tmp/mihomo.gz \
+  https://github.com/MetaCubeX/mihomo/releases/download/v1.18.0/mihomo-linux-amd64-v1.18.0.gz
+
+# 方式 B：ghproxy 国内镜像（无需代理，但稳定性不保证）
+wget https://ghproxy.com/https://github.com/MetaCubeX/mihomo/releases/download/v1.18.0/mihomo-linux-amd64-v1.18.0.gz -O /tmp/mihomo.gz
+
+# 解压安装
+gunzip /tmp/mihomo.gz
+chmod +x /tmp/mihomo
+sudo mv /tmp/mihomo /usr/local/bin/mihomo
+mkdir -p ~/.config/mihomo
+```
+
+> 架构非 amd64（如 arm64）请到 mihomo releases 页选对应版本，文件名换 `mihomo-linux-arm64-v1.18.0.gz`。`uname -m` 看架构。
+
+**步骤 2：上传 Windows Clash 配置**
+
+在 Windows 找到 Clash 的 config.yaml（Clash for Windows 一般在 `%USERPROFILE%\.config\clash\`，或在客户端的 profiles 目录；订阅 URL 也可直接用），scp 上传：
+
+```powershell
+scp C:\path\to\config.yaml ubuntu@腾讯云IP:~/.config/mihomo/config.yaml
+```
+
+> 端口以 config.yaml 里的 `mixed-port`/`port` 字段为准，下文以 7897 为例。如要改端口，编辑 config.yaml 后 `sudo systemctl restart mihomo`。
+
+**步骤 3：systemd 服务（开机自启）**
+
+```bash
+sudo tee /etc/systemd/system/mihomo.service > /dev/null <<'EOF'
+[Unit]
+Description=Mihomo (Clash Meta) Proxy
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mihomo -d /home/ubuntu/.config/mihomo
+Restart=on-failure
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now mihomo
+sleep 2
+curl -x http://127.0.0.1:7897 -sI https://github.com  # 验证，200 即通
+```
+
+**步骤 4：git 永久走代理**
+
+```bash
+git config --global http.proxy http://127.0.0.1:7897
+git config --global https.proxy http://127.0.0.1:7897
+```
+
+之后 `git pull`/`git push` 自动走代理，无需再开 SSH 隧道。
+
+### 5.3 常用命令
+
+```bash
+sudo systemctl restart mihomo   # 重启（改 config.yaml 后必须重启）
+sudo systemctl status mihomo     # 状态
+journalctl -u mihomo -f          # 实时日志
+curl -x http://127.0.0.1:7897 -sI https://github.com   # 验证代理
+git config --global --unset http.proxy  # 临时取消 git 代理
+```
+
+---
+
+## 6. 常见故障排查
 
 | 现象 | 排查 | 处理 |
 |---|---|---|
@@ -229,7 +358,7 @@ du -sh data/*.db logs/
 
 ---
 
-## 6. 速查卡
+## 7. 速查卡
 
 ```bash
 # 启停

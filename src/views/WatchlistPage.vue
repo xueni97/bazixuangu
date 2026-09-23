@@ -48,6 +48,13 @@
         >
           实时预览浮动
         </van-button>
+        <van-button
+          v-if="!isPostMarket"
+          size="mini" plain type="primary" class="preview-btn"
+          :loading="refreshing" @click="doRefreshQuotes"
+        >
+          刷新实时
+        </van-button>
       </div>
       <div class="cmp-row">
         <div v-for="s in srcStats" :key="s.source" class="cmp-item">
@@ -179,6 +186,7 @@ import {
   isAfterMarketClose, previewSettlement, getSignalDate,
 } from '../lib/watchlist.js'
 import { searchStocks } from '../api'
+import { fetchQuotes } from '../lib/market/quote.js'
 
 const records = ref([])
 const loading = ref(true)
@@ -188,6 +196,7 @@ const openRecs = ref(new Set())
 const reEntering = ref(null)
 const previews = ref([])
 const previewing = ref(false)
+const refreshing = ref(false)
 const isPostMarket = ref(true)
 
 const groups = computed(() => groupRecords(records.value))
@@ -304,6 +313,45 @@ async function doPreview() {
     showToast('预览失败：' + (e.message || '本地数据异常'))
   } finally {
     previewing.value = false
+  }
+}
+
+// 按当前 pending 标的批量拉网络实时报价，重算浮动盈亏（不写库）
+async function doRefreshQuotes() {
+  refreshing.value = true
+  try {
+    const pending = records.value.filter(
+      (r) => r.status !== 'settled' && r.entryPrice != null)
+    if (!pending.length) {
+      showToast('没有待开奖的持仓')
+      return
+    }
+    const quotes = await fetchQuotes(pending.map((r) => r.symbol))
+    const previewTime = Date.now()
+    const next = []
+    for (const r of pending) {
+      const q = quotes.get(r.symbol)
+      if (!q || !(r.entryPrice > 0)) continue
+      const unrealizedPnl = Math.round(
+        ((q.price - r.entryPrice) / r.entryPrice) * 10000) / 100
+      let unrealizedResult = 'flat'
+      if (unrealizedPnl > 0.01) unrealizedResult = 'win'
+      else if (unrealizedPnl < -0.01) unrealizedResult = 'lose'
+      next.push({
+        ...r, currentPrice: q.price, priceSource: 'realtime',
+        unrealizedPnl, unrealizedResult, previewTime,
+      })
+    }
+    if (!next.length) {
+      showToast('未取到实时行情（网络异常或停牌）')
+      return
+    }
+    previews.value = next
+    showToast(`实时行情已刷新（${next.length}/${pending.length} 只）`)
+  } catch (e) {
+    showToast('刷新失败：' + (e.message || '网络异常'))
+  } finally {
+    refreshing.value = false
   }
 }
 
