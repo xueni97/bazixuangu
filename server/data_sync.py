@@ -20,10 +20,18 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
+
+# baostock 主源（沪深，官方稳定通道；未安装时降级到东财三主机）
+try:
+    import baostock as bs
+    _BS_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    bs = None
+    _BS_AVAILABLE = False
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # 仓库根（bazixuangu/）
 
@@ -408,6 +416,80 @@ def _http_session() -> requests.Session:
     return _tls.session
 
 
+# ── baostock 主源（沪深，官方稳定通道；非线程安全，全局串行）──
+_bs_lock = threading.Lock()
+_bs_logged_in = False
+
+
+def _bs_ensure_login() -> None:
+    """baostock 全局 login（模块级单 session，非线程安全）。"""
+    global _bs_logged_in
+    if not _BS_AVAILABLE:
+        return
+    with _bs_lock:
+        if _bs_logged_in:
+            return
+        lg = bs.login()
+        if lg.error_code != "0":
+            raise RuntimeError(f"baostock login 失败：{lg.error_msg}")
+        _bs_logged_in = True
+
+
+def _bs_logout() -> None:
+    """sync_ma 结束时显式 logout，避免连接泄漏。"""
+    global _bs_logged_in
+    if not _BS_AVAILABLE or not _bs_logged_in:
+        return
+    with _bs_lock:
+        try:
+            bs.logout()
+        except Exception:  # noqa: BLE001
+            pass
+        _bs_logged_in = False
+
+
+def _bs_code(symbol: str) -> str | None:
+    """baostock 代码：60/68/90→sh.，00/20/30→sz.，北交所(4/8/9开头)→None 不支持。"""
+    if symbol.startswith(("60", "68", "90")):
+        return "sh." + symbol
+    if symbol.startswith(("00", "20", "30")):
+        return "sz." + symbol
+    return None
+
+
+def _fetch_kline_baostock(symbol: str) -> list[tuple[str, float]] | None:
+    """baostock 前复权日K（沪深 only；北交所返 None 走 fallback）。
+
+    baostock 非线程安全，query 在 _bs_lock 内串行执行。
+    一次 query 返回全部历史 K 线（不分页），MA_KLINE_LMT*3 自然日保险。
+    """
+    if not _BS_AVAILABLE:
+        return None
+    code = _bs_code(symbol)
+    if not code:
+        return None  # 北交所，baostock 不支持
+    _bs_ensure_login()
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=MA_KLINE_LMT * 3)).strftime("%Y-%m-%d")
+    with _bs_lock:  # baostock 全局 session 非线程安全，query 必须串行
+        rs = bs.query_history_k_data_plus(
+            code, "date,close",
+            start_date=start, end_date=end,
+            frequency="d", adjustflag="2",  # 2=前复权
+        )
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock query {code} 失败：{rs.error_msg}")
+        rows = []
+        while rs.next():
+            r = rs.get_row_data()
+            if len(r) >= 2 and r[0] and r[1]:
+                try:
+                    rows.append((r[0], float(r[1])))
+                except ValueError:
+                    pass
+        return rows
+
+
 def _em_secid(symbol: str) -> str:
     """东财 secid：60/68 开头为沪市 1.，其余（含北交所）为 0.。"""
     return ("1." if symbol.startswith(("60", "68")) else "0.") + symbol
@@ -556,11 +638,19 @@ def _fetch_kline_sina(session: requests.Session, code: str,
 
 
 def fetch_symbol_klines_ex(symbol: str) -> tuple[list[tuple[str, float]], str]:
-    """日K兜底链：东财(前复权,全市场) → 腾讯(前复权,沪深) → 新浪(不复权,含北交所)。
+    """日K主源链：baostock(沪深,官方稳定) → 东财(全市场) → 腾讯(沪深) → 新浪(含北交所)。
 
-    返回 (klines, source)；source ∈ em/tx/sina；全失败为 ([], "")。
-    熔断中的源直接跳过，不在单只标的上烧重试等待。
+    返回 (klines, source)；source ∈ baostock/em/tx/sina；全失败为 ([], "")。
+    baostock 不支持北交所(4/8/9开头)，自动跳过到东财 fallback。
     """
+    # 1. baostock 主源（沪深 only，官方稳定通道，不限流不卡死）
+    try:
+        rows = _fetch_kline_baostock(symbol)
+        if rows:
+            return rows, "baostock"
+    except Exception:  # noqa: BLE001
+        pass
+    # 2. 东财 fallback（全市场含北交所，镜像轮换 + 退避）
     session = _http_session()
     try:
         rows = _fetch_kline_em(session, _em_secid(symbol))
@@ -966,6 +1056,8 @@ def sync_ma(force: bool = False) -> dict:
             _ma_state.update(status="failed", phase="", last_error=str(e),
                              finished_at=datetime.now().strftime("%H:%M:%S"))
         return {"ok": False, "message": f"均线同步失败：{e}"}
+    finally:
+        _bs_logout()
 
 
 def sync_ma_async(force: bool = False) -> dict:
