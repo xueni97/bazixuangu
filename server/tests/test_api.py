@@ -463,6 +463,38 @@ def test_sync_endpoints(client, monkeypatch):
         assert k in body
 
 
+def test_quotes_endpoint(client, monkeypatch):
+    """POST /api/quotes：批量实时报价（mock 数据源，不联网）。"""
+    import app as app_module
+
+    fake = {
+        "600519": {"price": 1252.79, "change_pct": -0.08},
+        "830799": {"price": 34.28, "change_pct": 0.0},
+    }
+    monkeypatch.setattr(app_module, "fetch_quotes", lambda syms: fake)
+
+    resp = client.post("/api/quotes", json={"symbols": ["600519", "830799"]})
+    assert resp.status_code == 200
+    quotes = resp.get_json()["quotes"]
+    assert quotes["600519"]["price"] == 1252.79
+
+    # 空 symbols → 400
+    resp = client.post("/api/quotes", json={"symbols": []})
+    assert resp.status_code == 400
+
+    # 非数组 body → 400
+    resp = client.post("/api/quotes", json={"symbols": "600519"})
+    assert resp.status_code == 400
+
+
+def test_tx_quote_code_classification():
+    """_tx_quote_code：沪深北代码分类（北交所走 bj）。"""
+    assert data_sync._tx_quote_code("600519") == "sh600519"
+    assert data_sync._tx_quote_code("000001") == "sz000001"
+    assert data_sync._tx_quote_code("830799") == "bj830799"
+    assert data_sync._tx_quote_code("430047") == "bj430047"
+
+
 def test_sync_ma_pipeline(temp_db, monkeypatch):
     """均线同步状态机：并发拉取→计算→落 stock_ma + meta（全程不联网）。"""
     # 名称库 5 只标的，每只 300 根收盘 10 的日K（末日=目标交易日）

@@ -48,6 +48,7 @@ from data_sync import (  # noqa: E402
     ensure_tables,
     fetch_klines_batch_from_db,
     fetch_klines_from_db,
+    fetch_quotes,
     get_conn,
     get_spot_count,
     get_state,
@@ -464,6 +465,21 @@ def klines_batch():
     syms = [s for s in syms if isinstance(s, str) and s.strip()][:2000]
     m = fetch_klines_batch_from_db(syms)
     return jsonify({"map": m})
+
+
+@api.route("/quotes", methods=["POST"])
+def quotes():
+    """批量实时报价（自选/扫描页按当前节点标的手动刷新，秒级）。
+
+    body: {"symbols": ["600519", "000001", ...]}
+    返回: {"quotes": {"600519": {"price": 1533.0, "change_pct": 0.85}, ...}}
+    """
+    body = request.get_json(silent=True) or {}
+    syms = body.get("symbols") or []
+    if not isinstance(syms, list) or not syms:
+        return _json_err("body 缺少 symbols 数组", 400)
+    syms = [s for s in syms if isinstance(s, str) and s.strip()][:500]
+    return jsonify({"quotes": fetch_quotes(syms)})
 
 
 app.register_blueprint(api)

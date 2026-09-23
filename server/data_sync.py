@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -687,6 +688,121 @@ def fetch_symbol_klines_ex(symbol: str, use_baostock: bool = True
 def fetch_symbol_klines(symbol: str) -> list[tuple[str, float]]:
     """单只股票日K（不带来源标记，兼容旧调用/测试）。"""
     return fetch_symbol_klines_ex(symbol)[0]
+
+
+# ── 轻量批量实时报价（自选/扫描页按当前节点标的刷新，秒级）──
+QUOTE_BATCH = 100
+
+
+def _fetch_quotes_em(symbols: list[str]) -> dict[str, dict]:
+    """东财 ulist 批量报价（push2 → push2delay 两域轮换）。"""
+    secids = ",".join(_em_secid(s) for s in symbols)
+    url = ("https://{host}/api/qt/ulist.np/get"
+           "?fltt=2&invt=2&fields=f2,f3,f12&secids=" + secids)
+    session = _http_session()
+    payload = None
+    for host in ("push2", "push2delay"):
+        try:
+            r = session.get(url.format(host=host), timeout=8)
+            r.raise_for_status()
+            payload = r.json()
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if payload is None:
+        return {}
+    out: dict[str, dict] = {}
+    for d in (((payload or {}).get("data") or {}).get("diff") or []):
+        price = d.get("f2")
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            continue  # 停牌 f2='-'
+        chg = d.get("f3")
+        try:
+            chg = float(chg)
+        except (TypeError, ValueError):
+            chg = None
+        out[str(d.get("f12"))] = {"price": price, "change_pct": chg}
+    return out
+
+
+def _tx_quote_code(symbol: str) -> str:
+    """腾讯实时报价代码（沪深 sh/sz，北交所 bj；腾讯 K线不支持 bj，故独立）。"""
+    if symbol.startswith(("60", "68", "90")):
+        return "sh" + symbol
+    if symbol.startswith(("00", "20", "30")):
+        return "sz" + symbol
+    return "bj" + symbol
+
+
+def _fetch_quotes_tx(symbols: list[str]) -> dict[str, dict]:
+    """腾讯批量报价（仅解析 ASCII 字段，无 GBK 依赖）。
+
+    沪深：v_sh600519="1~名称~代码~最新价~昨收~...~涨跌幅%"，
+        最新价=[3]，昨收=[4]，涨跌幅=[32]
+    北交所：v_bj830799="62~名称~代码~最新价~昨收~..." 字段较短，
+        涨跌幅由 最新价/昨收 计算
+    """
+    codes = ",".join(_tx_quote_code(s) for s in symbols)
+    session = _http_session()
+    try:
+        r = session.get("https://qt.gtimg.cn/q=" + codes, timeout=8)
+        r.raise_for_status()
+        text = r.text
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[str, dict] = {}
+    for body in re.findall(r'v_[a-z]{2}\d+="([^"]*)";', text):
+        f = body.split("~")
+        if len(f) < 5:
+            continue
+        try:
+            price = float(f[3])
+        except ValueError:
+            continue
+        if price <= 0:
+            continue
+        chg: float | None = None
+        if len(f) >= 33:
+            try:
+                chg = float(f[32])
+            except ValueError:
+                chg = None
+        if chg is None:
+            try:
+                prev_close = float(f[4])
+            except ValueError:
+                prev_close = 0.0
+            if prev_close > 0:
+                chg = round((price - prev_close) / prev_close * 100, 2)
+        out[f[2]] = {"price": price, "change_pct": chg}
+    return out
+
+
+def fetch_quotes(symbols: list[str]) -> dict[str, dict]:
+    """按代码列表批量查实时报价。
+
+    返回 {symbol: {"price": float, "change_pct": float|None}}；停牌/无数据
+    的票不进入返回。东财分批拉，缺失票腾讯批量兜底。
+    """
+    uniq = list(dict.fromkeys(s for s in symbols if s))
+    if not uniq:
+        return {}
+    out: dict[str, dict] = {}
+    missing: list[str] = []
+    for i in range(0, len(uniq), QUOTE_BATCH):
+        batch = uniq[i:i + QUOTE_BATCH]
+        got = _fetch_quotes_em(batch)
+        for s in batch:
+            if s in got:
+                out[s] = got[s]
+            else:
+                missing.append(s)
+    if missing:
+        for s, q in _fetch_quotes_tx(missing).items():
+            out.setdefault(s, q)
+    return out
 
 
 def fetch_klines_from_db(symbol: str) -> list[list]:

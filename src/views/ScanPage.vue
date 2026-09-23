@@ -186,7 +186,13 @@
             <span v-for="g in p.useGods" :key="g" class="god-tag" :class="'bg-' + g">{{ g }}</span>
           </div>
           <div class="stat-row">
-            扫描 {{ scanResult.totalScanned }} 只 | 命中 {{ scanResult.totalMatched }} 只
+            <span>扫描 {{ scanResult.totalScanned }} 只 | 命中 {{ scanResult.totalMatched }} 只</span>
+            <van-button
+              size="mini" plain type="primary" class="quote-refresh-btn"
+              :loading="refreshingQuotes" @click="onRefreshQuotes"
+            >
+              刷新行情
+            </van-button>
           </div>
         </div>
 
@@ -361,11 +367,13 @@ import {
   scanStocks, searchStocks, getSectors, getSyncStatus, triggerSync, triggerMaSync,
 } from '../api'
 import { addWatchlist } from '../lib/watchlist.js'
+import { fetchQuotes } from '../lib/market/quote.js'
 
 const keyword = ref('')
 const loading = ref(false)
 const errorMsg = ref('')
 const scanResult = ref(null)
+const refreshingQuotes = ref(false)
 const scanResults = ref([])
 const searchResults = ref([])
 const sectorCounts = ref(null)
@@ -682,6 +690,33 @@ async function onScan() {
   }
 }
 
+// 按当前扫描结果行的标的批量拉实时报价，更新行价格（不重新扫描/评分）
+async function onRefreshQuotes() {
+  const rows = scanResult.value && scanResult.value.results
+  if (!rows || !rows.length) {
+    showToast('当前无结果可刷新')
+    return
+  }
+  refreshingQuotes.value = true
+  try {
+    const quotes = await fetchQuotes(rows.map((r) => r.symbol))
+    let n = 0
+    for (const r of rows) {
+      const q = quotes.get(r.symbol)
+      if (!q) continue
+      r.price = q.price
+      if (q.changePct != null) r.changePct = q.changePct
+      n++
+    }
+    if (!n) showToast('未取到实时行情（网络异常或停牌）')
+    else showToast(`行情已刷新（${n}/${rows.length} 只）`)
+  } catch (e) {
+    showToast('刷新失败：' + (e.message || '网络异常'))
+  } finally {
+    refreshingQuotes.value = false
+  }
+}
+
 async function onSearch() {
   if (!keyword.value.trim()) return
   if (!periods.value.length) {
@@ -921,7 +956,14 @@ onUnmounted(() => stopSyncPolling())
 .summary-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
 .use-label { font-size: 12px; color: var(--text-secondary); }
 .god-tag { padding: 2px 8px; border-radius: 4px; font-size: 12px; border: 1px solid; }
-.stat-row { font-size: 12px; color: var(--text-secondary); }
+.stat-row {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.quote-refresh-btn { margin-left: 8px; }
 
 .search-section, .scan-results { padding: 0 12px; }
 .section-title { font-size: 14px; font-weight: bold; margin-bottom: 8px; }
