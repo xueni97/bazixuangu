@@ -114,13 +114,30 @@ export function getSyncState() {
 }
 
 // ── 行情快照同步 ──────────────────────────────────────────
-// 数据源二选一（由 .env 的 VITE_DATA_SOURCE 控制）：
+// 数据源二选一（运行时可由页面 localStorage 覆盖 .env 默认值）：
 //   server = 走服务器 API（cron 已用 baostock 拉好入库，稳定不卡死）
 //   local  = 浏览器直连东财/新浪兜底链（无服务器时用，受数据源限流影响）
-const DATA_SOURCE = ((import.meta.env && import.meta.env.VITE_DATA_SOURCE) || 'local').toLowerCase()
-const API_BASE = DATA_SOURCE === 'server'
-  ? ((import.meta.env && import.meta.env.VITE_API_BASE) || '')
-  : ''
+const ENV_DATA_SOURCE = ((import.meta.env && import.meta.env.VITE_DATA_SOURCE) || 'local').toLowerCase()
+const ENV_API_BASE = (import.meta.env && import.meta.env.VITE_API_BASE) || ''
+
+/** 运行时数据源（localStorage 覆盖 env，便于页面切换免重启 vite）。 */
+export function getDataSource() {
+  try {
+    const v = localStorage.getItem('bazi_data_source')
+    if (v) return v.toLowerCase()
+  } catch (e) { /* SSR/无 localStorage */ }
+  return ENV_DATA_SOURCE
+}
+
+/** 设置运行时数据源（页面切换控件调用）。 */
+export function setDataSource(v) {
+  try { localStorage.setItem('bazi_data_source', v) } catch (e) {}
+}
+
+/** 当前 API base（仅 server 模式有值）。 */
+function currentApiBase() {
+  return getDataSource() === 'server' ? ENV_API_BASE : ''
+}
 
 export async function syncSpot() {
   if (spotState.status === 'syncing') return { ok: false, message: '同步进行中' }
@@ -131,19 +148,20 @@ export async function syncSpot() {
   spotState.finishedAt = ''
   try {
     let rows, source
-    if (API_BASE) {
+    const apiBase = currentApiBase()
+    if (apiBase) {
       // 服务器部署模式：触发服务器端同步（baostock 主源，稳定）→ 轮询完成 → 读库
       spotState.phase = '服务器同步中'
-      const t = await fetch(`${API_BASE}/api/sync`, { method: 'POST' })
+      const t = await fetch(`${apiBase}/api/sync`, { method: 'POST' })
       if (!t.ok && t.status !== 409) throw new Error(`服务器同步触发 HTTP ${t.status}`)
       const deadline = Date.now() + 120000 // 服务器 spot 一次 HTTP 全市场拉取，通常 30s 内
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 2000))
-        const st = await (await fetch(`${API_BASE}/api/sync/status`)).json()
+        const st = await (await fetch(`${apiBase}/api/sync/status`)).json()
         if (st.status !== 'syncing') break
       }
       spotState.phase = '服务器读取中'
-      const resp = await fetch(`${API_BASE}/api/spot`)
+      const resp = await fetch(`${apiBase}/api/spot`)
       if (!resp.ok) throw new Error(`服务器快照接口 HTTP ${resp.status}`)
       const d = await resp.json()
       rows = d.rows || []
@@ -241,6 +259,53 @@ export async function syncMa(period = 'day', force = false) {
   try {
     let tradeDate = await latestTradeDate(period)
     if (!tradeDate) tradeDate = _metaCache[cfg.dateKey] // 指数全源失败时沿用旧水位
+
+    // server 模式日线 MA：触发服务器 baostock 同步 + 轮询 + 读 stock_ma 表，免浏览器逐只拉 K 线
+    // 周线暂无服务器表，server 模式仍走本地 kline.js 兜底链
+    const apiBase = currentApiBase()
+    if (apiBase && period === 'day') {
+      st.phase = '服务器同步中'
+      const syncUrl = `${apiBase}/api/sync/ma${force ? '?force=1' : ''}`
+      const t = await fetch(syncUrl, { method: 'POST' })
+      if (!t.ok && t.status !== 409) throw new Error(`服务器 MA 同步触发 HTTP ${t.status}`)
+      const deadline = Date.now() + 300000 // 服务器 baostock 拉 ~5700 只 K 线 + 算 MA，3-5 分钟
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000))
+        const s = await (await fetch(`${apiBase}/api/sync/status`)).json()
+        if (s.ma_status !== 'syncing') break
+        if (s.ma_total) {
+          st.total = s.ma_total
+          st.done = s.ma_done || 0
+          st.phase = `服务器拉取 ${st.done}/${st.total}`
+        }
+      }
+      st.phase = '服务器读取中'
+      const resp = await fetch(`${apiBase}/api/ma`)
+      if (!resp.ok) throw new Error(`服务器 MA 接口 HTTP ${resp.status}`)
+      const d = await resp.json()
+      const rows = d.rows || []
+      if (!rows.length) throw new Error('服务器 MA 为空，请先跑 sync_once.py')
+      const maRows = rows.map((r) => ({
+        symbol: r.symbol,
+        tradeDate: r.tradeDate,
+        close: r.close,
+        high20: r.high20,
+        bars: r.bars,
+        ma144: r.ma144,
+        ma288: r.ma288,
+        source: r.source || 'server',
+      }))
+      await db.replaceAll(cfg.store, maRows)
+      _maCount = maRows.length
+      if (tradeDate) {
+        await setMetaCached(cfg.dateKey, tradeDate)
+        await setMetaCached(cfg.atKey, `${dateStr()} ${now()}`)
+      }
+      st.status = 'idle'
+      st.phase = ''
+      st.finishedAt = now()
+      return { ok: true, message: `同步成功(server-db)，共${maRows.length}只` }
+    }
 
     const symbols = await db.getAllKeys('spot')
     if (!symbols.length) throw new Error('股票标的为空，请先同步全市场快照')

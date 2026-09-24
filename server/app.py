@@ -510,6 +510,34 @@ def spot_all():
     })
 
 
+@api.route("/ma", methods=["GET"])
+def ma_all():
+    """全市场日均线数据（读 stock_ma 表，144/288 日线）。
+
+    服务器 cron/手动 sync_once 已用 baostock 拉日线 K 线 + 算 MA 入库，
+    浏览器 server 模式点"更新日均线"直读此接口，免浏览器逐只拉 K 线。
+    返回: {"source": "server-db", "rows": [{symbol, tradeDate, close, high20, bars, ma144, ma288, source}, ...]}
+    """
+    if not DB_PATH.exists():
+        return _json_err("数据库不存在，请先在服务器跑 server/sync_once.py", 503)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT symbol, trade_date, close, high20, bars, ma144, ma288, source "
+            "FROM stock_ma ORDER BY symbol"
+        ).fetchall()
+    finally:
+        conn.close()
+    return jsonify({
+        "source": "server-db",
+        "rows": [
+            {"symbol": r[0], "tradeDate": r[1], "close": r[2], "high20": r[3],
+             "bars": r[4], "ma144": r[5], "ma288": r[6], "source": r[7] or "em"}
+            for r in rows
+        ],
+    })
+
+
 app.register_blueprint(api)
 
 

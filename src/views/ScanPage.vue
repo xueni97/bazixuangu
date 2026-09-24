@@ -16,7 +16,14 @@
 
         <!-- 数据管理：快照 / 日均线 / 周均线，三个独立更新入口（手机端同样可见） -->
         <div class="data-card">
-          <div class="card-title">数据管理</div>
+          <div class="card-title">
+            数据管理
+            <span class="ds-switch">
+              <span class="ds-label">数据源：</span>
+              <van-button size="mini" :type="dataSource==='server'?'primary':'default'" @click="onSwitchDS('server')">服务器</van-button>
+              <van-button size="mini" :type="dataSource==='local'?'primary':'default'" @click="onSwitchDS('local')">直连</van-button>
+            </span>
+          </div>
           <div class="data-row">
             <div class="data-meta">
               <span class="data-name">行情快照</span>
@@ -368,6 +375,7 @@ import {
 } from '../api'
 import { addWatchlist } from '../lib/watchlist.js'
 import { fetchQuotes } from '../lib/market/quote.js'
+import { getDataSource, setDataSource } from '../lib/market/maSync.js'
 
 const keyword = ref('')
 const loading = ref(false)
@@ -468,6 +476,14 @@ const syncing = ref(false)
 const maSyncing = ref(false)
 const maWeekSyncing = ref(false)
 let syncTimer = null
+
+// 数据源切换（server | local），写 localStorage，免重启即时生效
+const dataSource = ref(getDataSource())
+function onSwitchDS(v) {
+  setDataSource(v)
+  dataSource.value = v
+  showToast(`数据源已切换为${v === 'server' ? '服务器' : '直连'}`)
+}
 
 function sectorPct(e) {
   if (!sectorCounts.value) return 0
@@ -792,6 +808,9 @@ onUnmounted(() => stopSyncPolling())
 .sync-btn { flex-shrink: 0; }
 
 /* ── 数据管理卡片：快照 / 日均线 / 周均线 ── */
+.data-card .card-title { display: flex; align-items: center; justify-content: space-between; }
+.ds-switch { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: normal; }
+.ds-label { color: #969799; }
 .data-card {
   margin: 0 12px 12px;
   padding: 10px 12px;
