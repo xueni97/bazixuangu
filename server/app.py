@@ -482,6 +482,34 @@ def quotes():
     return jsonify({"quotes": fetch_quotes(syms)})
 
 
+@api.route("/spot", methods=["GET"])
+def spot_all():
+    """全市场行情快照（读 stock_spot 表）。
+
+    服务器 cron 已用 baostock 拉好入库，浏览器 Web 版点"更新快照"直读此接口，
+    免拉东财 59 页分页（浏览器无法直连 baostock 裸 TCP）。
+    返回: {"source": "server-db", "rows": [{symbol, name, price, changePct, market, updatedAt}, ...]}
+    """
+    if not DB_PATH.exists():
+        return _json_err("数据库不存在，请先在服务器跑 server/sync_once.py", 503)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT symbol, name, price, change_pct, market, updated_at "
+            "FROM stock_spot ORDER BY symbol"
+        ).fetchall()
+    finally:
+        conn.close()
+    return jsonify({
+        "source": "server-db",
+        "rows": [
+            {"symbol": r[0], "name": r[1], "price": r[2], "changePct": r[3],
+             "market": r[4], "updatedAt": r[5]}
+            for r in rows
+        ],
+    })
+
+
 app.register_blueprint(api)
 
 

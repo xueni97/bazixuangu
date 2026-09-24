@@ -114,6 +114,10 @@ export function getSyncState() {
 }
 
 // ── 行情快照同步 ──────────────────────────────────────────
+// 服务器部署模式：VITE_API_BASE 有值时走服务器 API（cron 已用 baostock 拉好入库）；
+// 留空 = 本地/APP 独立模式，浏览器直连东财/新浪兜底链（浏览器无 TCP 能力，无法直连 baostock）。
+const API_BASE = (import.meta.env && import.meta.env.VITE_API_BASE) || ''
+
 export async function syncSpot() {
   if (spotState.status === 'syncing') return { ok: false, message: '同步进行中' }
   spotState.status = 'syncing'
@@ -122,7 +126,28 @@ export async function syncSpot() {
   spotState.startedAt = now()
   spotState.finishedAt = ''
   try {
-    const { rows, source } = await fetchSpot()
+    let rows, source
+    if (API_BASE) {
+      // 服务器部署模式：触发服务器端同步（baostock 主源，稳定）→ 轮询完成 → 读库
+      spotState.phase = '服务器同步中'
+      const t = await fetch(`${API_BASE}/api/sync`, { method: 'POST' })
+      if (!t.ok && t.status !== 409) throw new Error(`服务器同步触发 HTTP ${t.status}`)
+      const deadline = Date.now() + 120000 // 服务器 spot 一次 HTTP 全市场拉取，通常 30s 内
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const st = await (await fetch(`${API_BASE}/api/sync/status`)).json()
+        if (st.status !== 'syncing') break
+      }
+      spotState.phase = '服务器读取中'
+      const resp = await fetch(`${API_BASE}/api/spot`)
+      if (!resp.ok) throw new Error(`服务器快照接口 HTTP ${resp.status}`)
+      const d = await resp.json()
+      rows = d.rows || []
+      source = d.source || 'server-db'
+      if (!rows.length) throw new Error('服务器快照为空，请先在服务器跑 sync_once.py')
+    } else {
+      ;({ rows, source } = await fetchSpot())
+    }
     spotState.phase = `写库中(${rows.length}只)`
     await db.replaceAll('spot', rows)
     await setMetaCached('last_success_date', dateStr())
