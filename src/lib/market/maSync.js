@@ -114,9 +114,13 @@ export function getSyncState() {
 }
 
 // ── 行情快照同步 ──────────────────────────────────────────
-// 服务器部署模式：VITE_API_BASE 有值时走服务器 API（cron 已用 baostock 拉好入库）；
-// 留空 = 本地/APP 独立模式，浏览器直连东财/新浪兜底链（浏览器无 TCP 能力，无法直连 baostock）。
-const API_BASE = (import.meta.env && import.meta.env.VITE_API_BASE) || ''
+// 数据源二选一（由 .env 的 VITE_DATA_SOURCE 控制）：
+//   server = 走服务器 API（cron 已用 baostock 拉好入库，稳定不卡死）
+//   local  = 浏览器直连东财/新浪兜底链（无服务器时用，受数据源限流影响）
+const DATA_SOURCE = ((import.meta.env && import.meta.env.VITE_DATA_SOURCE) || 'local').toLowerCase()
+const API_BASE = DATA_SOURCE === 'server'
+  ? ((import.meta.env && import.meta.env.VITE_API_BASE) || '')
+  : ''
 
 export async function syncSpot() {
   if (spotState.status === 'syncing') return { ok: false, message: '同步进行中' }
