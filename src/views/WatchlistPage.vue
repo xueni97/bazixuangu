@@ -97,6 +97,15 @@
           </span>
         </template>
         <span v-else-if="g.pending" class="day-sub pending-txt">等明日收盘开奖</span>
+        <van-button
+          v-if="g.pending"
+          size="mini"
+          type="warning"
+          plain
+          class="day-settle-btn"
+          :loading="groupSettling === g.date"
+          @click.stop="onSettleGroup(g.date)"
+        >一键结算</van-button>
       </div>
 
       <div v-show="openGroups.has(g.date)" class="day-body">
@@ -283,6 +292,29 @@ function toggleRec(id) {
   if (s.has(id)) s.delete(id)
   else s.add(id)
   openRecs.value = s
+}
+
+// 单个信号日分组手动一键结算（用于补结算历史未结算分组，如多日未开 APP）
+const groupSettling = ref('')
+async function onSettleGroup(signalDate) {
+  groupSettling.value = signalDate
+  try {
+    const r = await settleWatchlist(
+      (done, total) => { progress.value = { done, total } },
+      signalDate,
+    )
+    records.value = await listRecords()
+    if (!r.settled) {
+      showToast(`无可结算（数据未到或K线缺失），检查 ${r.noData} 条`)
+    } else {
+      showToast(`${signalDate} 分组结算完成：胜${r.win} 负${r.lose}${r.flat ? ` 平${r.flat}` : ''}`)
+    }
+  } catch (e) {
+    showToast('结算失败：' + (e.message || '本地数据异常'))
+  } finally {
+    groupSettling.value = ''
+    progress.value = { done: 0, total: 0 }
+  }
 }
 
 async function load(doSettle) {
@@ -509,6 +541,7 @@ async function onReEnter(r) {
   border-radius: 10px 10px 0 0;
   font-size: 13px;
 }
+.day-settle-btn { margin-left: auto; flex-shrink: 0; }
 .day-arrow { color: var(--text-secondary); }
 .day-date { font-weight: bold; }
 .day-count { color: var(--text-secondary); font-size: 12px; }

@@ -133,12 +133,18 @@ async function fetchKlines(symbol) {
 /**
  * 结算所有到期的 pending 记录（信号日早于最新交易日）。
  * 按票拉取日K（兜底链 + 会话缓存，4 并发）。
+ *
+ * @param {function|null} onProgress - 进度回调(done, total)
+ * @param {string|null} signalDate - 指定信号日（YYYY-MM-DD），仅结算该日分组；
+ *        null = 全部分组（兼容旧调用）
  */
-export async function settleWatchlist(onProgress = null) {
+export async function settleWatchlist(onProgress = null, signalDate = null) {
   const recs = await listRecords()
   const latest = await db.getMeta('ma_trade_date')
   const pending = recs.filter((r) =>
-    r.status !== 'settled' && (!latest || r.signalDate < latest))
+    r.status !== 'settled'
+    && (!latest || r.signalDate < latest)
+    && (!signalDate || r.signalDate === signalDate))
   if (!pending.length) return { checked: 0, settled: 0, win: 0, lose: 0, flat: 0, noData: 0 }
 
   const symbols = [...new Set(pending.map((r) => r.symbol))]
