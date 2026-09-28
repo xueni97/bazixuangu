@@ -275,8 +275,8 @@ export async function runBacktest(model, startDate, onProgress = null) {
     const dateStr = calendar[i]
     const dt = new Date(dateStr + 'T12:00:00')
 
-    // 信号（纯命理，无K线依赖）
-    const signal = YuanhaiDecisionModel.buyPointSignal(dt)
+    // 信号（月0.5/周0.3/日0.2加权，月买点力量最大，不再只看日买点）
+    const signal = YuanhaiDecisionModel.weightedBuyPointSignal(dt, model.params.periods)
 
     // 收盘价查询函数
     const closeOf = (sym) => {
@@ -327,7 +327,13 @@ export async function runBacktest(model, startDate, onProgress = null) {
     }
     // 仅记录有交易的日子，避免日志爆炸
     if (soldSignal || soldExpired || boughtCount) {
-      log(`${dateStr} 信号=${signal.action}` +
+      // 月/周/日分项信号（月买点力量最大）
+      const pd = signal.periodDetail || {}
+      const pdStr = ['monthly', 'weekly', 'daily']
+        .filter((p) => pd[p])
+        .map((p) => `${p === 'monthly' ? '月' : p === 'weekly' ? '周' : '日'}${pd[p].action}(${pd[p].signalScore})`)
+        .join(' ')
+      log(`${dateStr} 信号=${signal.action}(${signal.signalScore}) ${pdStr}` +
           (soldSignal ? ` 信号卖出${soldSignal}` : '') +
           (soldExpired ? ` 到期卖出${soldExpired}` : '') +
           (boughtCount ? ` 买入${boughtCount}只` : '') +

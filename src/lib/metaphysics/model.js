@@ -699,4 +699,62 @@ export class YuanhaiDecisionModel {
       signals,
     }
   }
+
+  /**
+   * 多周期加权买点信号（月0.5/周0.3/日0.2，与综合评分权重一致）。
+   *
+   * 月令为提纲，月级别信号力量最大；周次之；日级别最弱但最敏感。
+   * 对月/周/日三个时间点分别算 buyPointSignal，按 PERIOD_WEIGHTS 加权合成。
+   * 月周期买点信号权重最高（0.5），日买点不应单独决定买卖。
+   *
+   * @param {Date} dt 当日时间
+   * @param {string[]} periods 勾选周期，默认 ['monthly','weekly','daily']
+   */
+  static weightedBuyPointSignal(dt, periods = ['monthly', 'weekly', 'daily']) {
+    const weights = { monthly: 0.5, weekly: 0.3, daily: 0.2 }
+    const labels = { monthly: '月', weekly: '周', daily: '日' }
+    const chosen = periods.length ? periods : ['daily']
+    const totalW = chosen.reduce((s, p) => s + (weights[p] || 0), 0) || 1
+
+    const periodDetail = {}
+    let weightedScore = 0
+    const allSignals = []
+    let dailyPillars = ''
+
+    for (const p of chosen) {
+      const pdt = _periodDatetime(dt, p)
+      const sig = YuanhaiDecisionModel.buyPointSignal(pdt)
+      periodDetail[p] = sig
+      const w = (weights[p] || 0) / totalW
+      weightedScore += w * sig.signalScore
+      const lbl = labels[p] || p
+      allSignals.push(...sig.signals.map((s) => `[${lbl}] ${s}`))
+      if (p === 'daily') dailyPillars = sig.pillars
+    }
+
+    weightedScore = Math.round(weightedScore * 10) / 10
+
+    // 月周期主导：月买点信号单独过强时额外加减分（月令提纲，力量加倍）
+    if (periodDetail.monthly) {
+      const ms = periodDetail.monthly.signalScore
+      if (ms >= 30) weightedScore += 5  // 月级强买点额外加成
+      else if (ms <= -25) weightedScore -= 5  // 月级强卖点额外压制
+    }
+
+    let action
+    if (weightedScore >= 20) action = '买入'
+    else if (weightedScore >= 5) action = '轻仓试探'
+    else if (weightedScore >= -10) action = '观望'
+    else if (weightedScore >= -25) action = '减仓'
+    else action = '卖出'
+
+    return {
+      date: _fmtDate(dt),
+      pillars: dailyPillars || (periodDetail.daily && periodDetail.daily.pillars) || '',
+      signalScore: weightedScore,
+      action,
+      signals: allSignals,
+      periodDetail,
+    }
+  }
 }
