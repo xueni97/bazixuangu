@@ -310,54 +310,71 @@ export async function syncMa(period = 'day', force = false) {
     // server 模式周K：服务器无周K表，但 stock_kline 日K表已由 cron 拉好。
     // 走批量 /api/klines/batch 拉日K → aggregateWeekly 聚合周K → computeMaSnapshot 算 MA144/288
     // 彻底避开东财/腾讯/新浪周K接口（频发 501/201/限流）。
+    // CHUNK=200：每批 ~25MB，避免响应体过大触发 ERR_CONTENT_LENGTH_MISMATCH
+    //   （2000只×5000日K×25字节≈250MB 会被 nginx/服务器中途切断连接）
     if (apiBase && period === 'week') {
       const symbols = await db.getAllKeys('spot')
       if (!symbols.length) throw new Error('股票标的为空，请先同步全市场快照')
       const maRows = []
       let pulled = 0
-      // 诊断：分类统计失败原因
       let diagNoBars = 0, diagShortBars = 0, diagShortWeek = 0, diagNoSnap = 0, diagOk = 0
       let firstSampleLogged = false
-      const CHUNK = 2000
+      const CHUNK = 200
       st.total = symbols.length
       st.done = 0
       st.phase = `服务器周K聚合 0/${symbols.length}`
-      for (let i = 0; i < symbols.length; i += CHUNK) {
-        const chunk = symbols.slice(i, i + CHUNK)
+      const fetchChunk = async (chunk) => {
+        // 批量接口小失败时降级单只兜底，保证不丢数据
         try {
           const r = await fetch(`${apiBase}/api/klines/batch`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ symbols: chunk }),
           })
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
           const d = await r.json()
-          const map = (d && d.map) || {}
-          // 诊断：第一个 chunk 的样本输出
-          if (!firstSampleLogged) {
-            const sampleSym = chunk[0]
-            const sampleBars = map[sampleSym]
-            console.log('[周K聚合诊断]', {
-              chunkSize: chunk.length, apiResponseKeys: Object.keys(d || {}),
-              mapKeysCount: Object.keys(map).length,
-              sampleSym, sampleBarsType: Array.isArray(sampleBars) ? 'array' : typeof sampleBars,
-              sampleBarsLen: Array.isArray(sampleBars) ? sampleBars.length : 0,
-              sampleBarsHead: Array.isArray(sampleBars) ? sampleBars.slice(0, 2) : sampleBars,
-            })
-            firstSampleLogged = true
-          }
+          return (d && d.map) || {}
+        } catch (e) {
+          console.warn(`[周K聚合] batch 失败 (${chunk.length}只)，降级单只兜底`, e.message)
+          // 单只兜底
+          const m = {}
           for (const sym of chunk) {
-            const dayBars = map[sym]
-            if (!Array.isArray(dayBars) || !dayBars.length) { diagNoBars++; continue }
-            if (dayBars.length < 144) { diagShortBars++; continue }
-            const weekBars = aggregateWeekly(dayBars)
-            if (weekBars.length < 144) { diagShortWeek++; continue }
-            const snap = computeMaSnapshot(sym, weekBars)
-            if (!snap) { diagNoSnap++; continue }
-            snap.source = 'server-week-aggr'
-            maRows.push(snap)
-            diagOk++
+            try {
+              const r2 = await fetch(`${apiBase}/api/klines?symbol=${encodeURIComponent(sym)}`)
+              if (r2.ok) {
+                const d2 = await r2.json()
+                if (d2 && Array.isArray(d2.bars)) m[sym] = d2.bars
+              }
+            } catch { /* 单只失败跳过 */ }
           }
-        } catch (e) { console.warn('[周K聚合] chunk 失败', e); /* 块失败，后续块继续 */ }
+          return m
+        }
+      }
+      for (let i = 0; i < symbols.length; i += CHUNK) {
+        const chunk = symbols.slice(i, i + CHUNK)
+        const map = await fetchChunk(chunk)
+        if (!firstSampleLogged) {
+          const sampleSym = chunk[0]
+          const sampleBars = map[sampleSym]
+          console.log('[周K聚合诊断]', {
+            chunkSize: chunk.length, mapKeysCount: Object.keys(map).length,
+            sampleSym, sampleBarsLen: Array.isArray(sampleBars) ? sampleBars.length : 0,
+            sampleBarsHead: Array.isArray(sampleBars) ? sampleBars.slice(0, 2) : sampleBars,
+          })
+          firstSampleLogged = true
+        }
+        for (const sym of chunk) {
+          const dayBars = map[sym]
+          if (!Array.isArray(dayBars) || !dayBars.length) { diagNoBars++; continue }
+          if (dayBars.length < 144) { diagShortBars++; continue }
+          const weekBars = aggregateWeekly(dayBars)
+          if (weekBars.length < 144) { diagShortWeek++; continue }
+          const snap = computeMaSnapshot(sym, weekBars)
+          if (!snap) { diagNoSnap++; continue }
+          snap.source = 'server-week-aggr'
+          maRows.push(snap)
+          diagOk++
+        }
         pulled += chunk.length
         st.done = pulled
         st.phase = `服务器周K聚合 ${pulled}/${symbols.length}`
@@ -370,7 +387,6 @@ export async function syncMa(period = 'day', force = false) {
       })
       await db.replaceAll(cfg.store, maRows)
       _maWeekCount = maRows.length
-      // 二次校验：直接 count 数据库看实际写入多少
       const actualCount = await db.count('maWeek')
       console.log('[周K聚合持久化校验]', { maRowsLen: maRows.length, dbCount: actualCount })
       if (tradeDate) {
