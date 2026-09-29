@@ -13,6 +13,7 @@
  */
 
 import { BaziEngine } from './bazi.js'
+import { getAlmanac, isAlmanacInauspicious } from './almanac.js'
 import { StockImageryAnalyzer } from './imagery.js'
 import { STEM_IMAGERY, GOD_IMAGERY, INDUSTRY_IMAGERY, CHAR_STEM } from './imageryData.js'
 import {
@@ -772,6 +773,16 @@ export class YuanhaiDecisionModel {
     else if (weightedScore >= -25) action = '减仓'
     else action = '卖出'
 
+    // 黄历凶日降级：四离/四绝/岁破/月破/凶值星 → 不宜开市交易
+    // 命理信号即便"买入"也要降级为"观望"，不入池
+    const alm = getAlmanac(dt)
+    if (alm.inauspicious && (action === '买入' || action === '轻仓试探')) {
+      action = '观望'
+      weightedScore = Math.min(weightedScore, 0)
+      vetoed = vetoed || 'almanac_inauspicious'
+      allSignals.unshift(`[黄历] 凶日：${alm.reasons.join('、')}，降级观望`)
+    }
+
     if (vetoed) allSignals.unshift(`[否决] ${vetoed}（月/周级别不配合，压制日买点）`)
 
     return {
@@ -782,6 +793,7 @@ export class YuanhaiDecisionModel {
       signals: allSignals,
       periodDetail,
       vetoed: !!vetoed,
+      almanac: alm,
     }
   }
 }
