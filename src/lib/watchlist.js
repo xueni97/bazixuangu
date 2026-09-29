@@ -24,9 +24,14 @@ export function recordId(signalDate, symbol) {
 /**
  * 纯函数：用日K（[[date, close], ...]）给一条 pending 记录结算。
  * 返回结算字段对象；尚不能结算返回 null。便于单测，无 IO 依赖。
+ *
+ * @param {object} rec 待结算记录
+ * @param {Array} klines 日K线
+ * @param {boolean} force 强制重算（已 settled 也重算，用于历史战绩修正）
  */
-export function evaluateNextBar(rec, klines) {
-  if (!rec || rec.status === 'settled') return null
+export function evaluateNextBar(rec, klines, force = false) {
+  if (!rec) return null
+  if (!force && rec.status === 'settled') return null
   if (!Array.isArray(klines) || !klines.length || rec.entryPrice == null) return null
   const sorted = klines
     .filter((k) => k && k[0] && k[1] != null)
@@ -137,12 +142,14 @@ async function fetchKlines(symbol) {
  * @param {function|null} onProgress - 进度回调(done, total)
  * @param {string|null} signalDate - 指定信号日（YYYY-MM-DD），仅结算该日分组；
  *        null = 全部分组（兼容旧调用）
+ * @param {boolean} force - 强制重算（含已 settled 记录），用于历史战绩一键结算
+ *        仅对历史信号日（< 最新交易日）生效，避免盘中重算造成虚假战绩
  */
-export async function settleWatchlist(onProgress = null, signalDate = null) {
+export async function settleWatchlist(onProgress = null, signalDate = null, force = false) {
   const recs = await listRecords()
   const latest = await db.getMeta('ma_trade_date')
   const pending = recs.filter((r) =>
-    r.status !== 'settled'
+    (force || r.status !== 'settled')
     && (!latest || r.signalDate < latest)
     && (!signalDate || r.signalDate === signalDate))
   if (!pending.length) return { checked: 0, settled: 0, win: 0, lose: 0, flat: 0, noData: 0 }
@@ -163,7 +170,7 @@ export async function settleWatchlist(onProgress = null, signalDate = null) {
 
   let settled = 0, win = 0, lose = 0, flat = 0, noData = 0
   for (const rec of pending) {
-    const upd = evaluateNextBar(rec, klineMap[rec.symbol])
+    const upd = evaluateNextBar(rec, klineMap[rec.symbol], force)
     if (!upd) { noData++; continue }
     await db.put('watchlist', { ...rec, ...upd })
     settled++
