@@ -318,25 +318,26 @@ export async function syncMa(period = 'day', force = false) {
       const symbols = await db.getAllKeys('spot')
       if (!symbols.length) throw new Error('股票标的为空，请先同步全市场快照')
 
-      // 增量判断：用 meta 水位 + 覆盖率，不逐只比较 existing[s]
+      // 增量判断：水位对齐即可跳过，不卡覆盖率
+      // 覆盖率不达标通常是次新股/停牌/退市等天然无效标的（<144根周K），
+      // 重拉也改善不了覆盖率，但每次触发全量重拉 5570 只，浪费几分钟。
+      // 水位对齐说明本周已聚合过，缺口是天然缺口，安全跳过。
       const metaAligned = tradeDate && _metaCache[cfg.dateKey] === tradeDate
-      const coverageOk = _maWeekCount >= symbols.length * COV_OK
       console.log('[周K增量判断]', {
         tradeDate,
         metaCacheDate: _metaCache[cfg.dateKey],
         metaAligned,
         maWeekCount: _maWeekCount,
         spotCount: symbols.length,
-        coverageOk,
         coverage: symbols.length ? (_maWeekCount / symbols.length).toFixed(3) : 0,
         force,
-        willSkip: !force && metaAligned && coverageOk,
+        willSkip: !force && metaAligned,
       })
-      if (!force && metaAligned && coverageOk) {
+      if (!force && metaAligned) {
         st.status = 'idle'
         st.phase = ''
         st.finishedAt = now()
-        return { ok: true, skipped: true, message: `${cfg.label}已为最新（${tradeDate}，${_maWeekCount}只）` }
+        return { ok: true, skipped: true, message: `${cfg.label}已为最新（${tradeDate}，${_maWeekCount}只，覆盖率${(symbols.length ? (_maWeekCount / symbols.length * 100).toFixed(1) : 0)}%）` }
       }
 
       const maRows = []
