@@ -321,6 +321,17 @@ export async function syncMa(period = 'day', force = false) {
       // 增量判断：用 meta 水位 + 覆盖率，不逐只比较 existing[s]
       const metaAligned = tradeDate && _metaCache[cfg.dateKey] === tradeDate
       const coverageOk = _maWeekCount >= symbols.length * COV_OK
+      console.log('[周K增量判断]', {
+        tradeDate,
+        metaCacheDate: _metaCache[cfg.dateKey],
+        metaAligned,
+        maWeekCount: _maWeekCount,
+        spotCount: symbols.length,
+        coverageOk,
+        coverage: symbols.length ? (_maWeekCount / symbols.length).toFixed(3) : 0,
+        force,
+        willSkip: !force && metaAligned && coverageOk,
+      })
       if (!force && metaAligned && coverageOk) {
         st.status = 'idle'
         st.phase = ''
