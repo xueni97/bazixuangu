@@ -318,7 +318,10 @@ async function onSettleGroup(signalDate, force = false) {
     )
     records.value = await listRecords()
     if (!r.settled) {
-      showToast(`无可结算（数据未到或K线缺失），检查 ${r.noData} 条`)
+      const diag = force
+        ? `（无K线${r.noKlines || 0}/无入场价${r.noEntry || 0}/无次日K${r.noNext || 0}）`
+        : `（数据未到或K线缺失，检查 ${r.noData} 条）`
+      showToast(`无可结算${diag}`)
     } else {
       showToast(`${signalDate} 分组${force ? '重算' : '结算'}完成：胜${r.win} 负${r.lose}${r.flat ? ` 平${r.flat}` : ''}`)
     }

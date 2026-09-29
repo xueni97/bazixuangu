@@ -148,9 +148,12 @@ async function fetchKlines(symbol) {
 export async function settleWatchlist(onProgress = null, signalDate = null, force = false) {
   const recs = await listRecords()
   const latest = await db.getMeta('ma_trade_date')
+  // force 路径下放宽 latest 约束：用户主动点「重算战绩」按钮时，
+  // 已 settled 的历史记录 signalDate 可能 ≥ latest（ma 表未再同步），
+  // 不应被过滤——只要 signalDate 匹配就重算
   const pending = recs.filter((r) =>
     (force || r.status !== 'settled')
-    && (!latest || r.signalDate < latest)
+    && (force || !latest || r.signalDate < latest)
     && (!signalDate || r.signalDate === signalDate))
   if (!pending.length) return { checked: 0, settled: 0, win: 0, lose: 0, flat: 0, noData: 0 }
 
@@ -169,16 +172,21 @@ export async function settleWatchlist(onProgress = null, signalDate = null, forc
   await Promise.all(Array.from({ length: Math.min(CONC, symbols.length) }, pull))
 
   let settled = 0, win = 0, lose = 0, flat = 0, noData = 0
+  let noEntry = 0, noKlines = 0, noNext = 0  // 诊断字段
   for (const rec of pending) {
-    const upd = evaluateNextBar(rec, klineMap[rec.symbol], force)
-    if (!upd) { noData++; continue }
+    const ks = klineMap[rec.symbol]
+    // 诊断：分别记录失败原因
+    if (!Array.isArray(ks) || !ks.length) { noKlines++; noData++; continue }
+    if (rec.entryPrice == null || !(rec.entryPrice > 0)) { noEntry++; noData++; continue }
+    const upd = evaluateNextBar(rec, ks, force)
+    if (!upd) { noNext++; noData++; continue }
     await db.put('watchlist', { ...rec, ...upd })
     settled++
     if (upd.result === 'win') win++
     else if (upd.result === 'lose') lose++
     else flat++
   }
-  return { checked: pending.length, settled, win, lose, flat, noData }
+  return { checked: pending.length, settled, win, lose, flat, noData, noEntry, noKlines, noNext }
 }
 
 // ── 盘中预览浮动（不写库） ─────────────────────────────────
