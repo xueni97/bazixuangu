@@ -153,7 +153,7 @@
           </div>
           <div v-if="selectedMa.length || selectedMaWeek.length" class="filter-row">
             <span class="filter-label">回踩容差</span>
-            <van-stepper v-model="maTolPct" :min="1" :max="30" :step="1" integer
+            <van-stepper v-model="maTolPct" :min="1" :max="50" :step="1" integer
               button-size="26" class="tol-stepper" />
             <span class="filter-hint">距离均线 ±{{ maTolPct }}% 内，且前20日/周曾站上均线</span>
           </div>

@@ -72,7 +72,8 @@ export async function scanStocks(params = {}) {
   const maWeekWindows = parseWindows(p.maw)  // 周均线
   let maTol = parseFloat(p.ma_tol)
   if (Number.isNaN(maTol)) maTol = 0.03
-  maTol = Math.min(0.1, Math.max(0.005, maTol))
+  // 允许 1-50% 自由设定，与 ScanPage van-stepper 一致
+  maTol = Math.min(0.5, Math.max(0.005, maTol))
 
   // 属性/市场/价格筛选
   const elemFilter = new Set(
