@@ -83,11 +83,14 @@
         <div class="filter-card">
           <div class="filter-row">
             <span class="filter-label">周期效应</span>
-            <van-checkbox-group v-model="periods" direction="horizontal" class="period-group">
-              <van-checkbox name="monthly" shape="square" icon-size="15">月</van-checkbox>
-              <van-checkbox name="weekly" shape="square" icon-size="15">周</van-checkbox>
-              <van-checkbox name="daily" shape="square" icon-size="15">日</van-checkbox>
-            </van-checkbox-group>
+            <div class="chip-group">
+              <span
+                v-for="pk in PERIOD_OPTIONS" :key="pk"
+                class="filter-chip period-chip"
+                :class="{ active: periods.includes(pk) }"
+                @click="togglePeriod(pk)"
+              >{{ PERIOD_LABEL[pk] }}</span>
+            </div>
             <span class="filter-hint">月0.5/周0.3/日0.2 加权</span>
           </div>
           <div class="filter-row">
@@ -184,13 +187,32 @@
               周均线 {{ scanResult.maWeekTradeDate }}
             </van-tag>
           </div>
-          <!-- 各勾选周期的盘面用神 -->
+          <!-- 各勾选周期的盘面用神 + 买卖方向 + 黄历趋吉避凶 -->
           <div v-for="p in scanResult.periods" :key="p.key" class="period-summary">
             <span class="period-name">{{ p.label }}效应</span>
             <span class="period-date">{{ p.date }}</span>
             <span class="period-pillars">{{ p.pillars }}</span>
             <span class="use-label">用神:</span>
             <span v-for="g in p.useGods" :key="g" class="god-tag" :class="'bg-' + g">{{ g }}</span>
+            <span class="dir-tag" :class="dirClass(p.direction)">{{ p.label }}·{{ p.direction }}</span>
+            <span v-if="p.almanac?.inauspicious" class="alm-tag alm-evil">
+              ⚠{{ p.almanac.reasons.join('、') }}
+            </span>
+            <span v-else-if="p.almanac?.officer" class="alm-tag alm-good">值星{{ p.almanac.officer }}</span>
+          </div>
+          <!-- 综合方向（加权）+ 当日黄历 -->
+          <div v-if="scanResult.weightedAction" class="period-summary weighted-row">
+            <span class="period-name weighted">综合·趋吉避凶</span>
+            <span class="dir-tag" :class="dirClass(scanResult.weightedAction)">
+              {{ scanResult.weightedAction }}（{{ scanResult.weightedScore > 0 ? '+' : '' }}{{ scanResult.weightedScore }}）
+            </span>
+            <span v-if="scanResult.weightedVetoed" class="alm-tag alm-veto">⛔ 已降级观望</span>
+            <span v-if="scanResult.weightedAlmanac?.inauspicious" class="alm-tag alm-evil">
+              ⚠{{ scanResult.weightedAlmanac.reasons.join('、') }}
+            </span>
+            <span v-else-if="scanResult.weightedAlmanac?.officer" class="alm-tag alm-good">
+              黄历吉·值星{{ scanResult.weightedAlmanac.officer }}
+            </span>
           </div>
           <div class="stat-row">
             <span>扫描 {{ scanResult.totalScanned }} 只 | 命中 {{ scanResult.totalMatched }} 只</span>
@@ -389,6 +411,7 @@ const sectorCounts = ref(null)
 // ── 多周期叠加 + 属性筛选状态 ──
 const ELEMENT_OPTIONS = ['木', '火', '土', '金', '水']
 const MARKET_OPTIONS = ['沪', '深', '北交所']
+const PERIOD_OPTIONS = ['monthly', 'weekly', 'daily']
 const PERIOD_LABEL = { monthly: '月', weekly: '周', daily: '日' }
 const periods = ref(['monthly', 'weekly', 'daily'])
 const selectedElements = ref([])
@@ -422,6 +445,15 @@ function toggleElement(e) {
   const i = selectedElements.value.indexOf(e)
   if (i === -1) selectedElements.value.push(e)
   else selectedElements.value.splice(i, 1)
+}
+
+// 周期勾选（至少保留 1 个，避免空选导致扫描失败）
+function togglePeriod(pk) {
+  const i = periods.value.indexOf(pk)
+  if (i === -1) periods.value.push(pk)
+  else if (periods.value.length > 1) periods.value.splice(i, 1)
+  // 保持月→周→日顺序
+  periods.value = PERIOD_OPTIONS.filter((p) => periods.value.includes(p))
 }
 
 function toggleMarket(m) {
@@ -766,6 +798,16 @@ function scoreClass(score) {
   return 'score-bad'
 }
 
+// 买卖方向配色：买入/轻仓=红，观望=灰，减仓/卖出=绿
+function dirClass(action) {
+  if (action === '买入') return 'dir-buy'
+  if (action === '轻仓试探') return 'dir-light'
+  if (action === '观望') return 'dir-hold'
+  if (action === '减仓') return 'dir-reduce'
+  if (action === '卖出') return 'dir-sell'
+  return 'dir-hold'
+}
+
 onMounted(async () => {
   await refreshSyncStatus()
   loadSectors()
@@ -847,8 +889,6 @@ onUnmounted(() => stopSyncPolling())
 .filter-row + .filter-row { border-top: 1px solid rgba(255,255,255,0.06); }
 .filter-label { font-size: 13px; color: var(--text-secondary); width: 56px; flex-shrink: 0; }
 .filter-hint { font-size: 11px; color: var(--text-secondary); }
-.period-group { display: flex; gap: 16px; flex: 1; }
-.period-group :deep(.van-checkbox__label) { color: var(--text-primary); margin-left: 4px; }
 
 .chip-group { display: flex; gap: 8px; flex-wrap: wrap; }
 .filter-chip {
@@ -909,8 +949,56 @@ onUnmounted(() => stopSyncPolling())
   margin: 4px 0;
 }
 .period-name { font-weight: bold; color: var(--text-primary); }
+.period-name.weighted { color: var(--accent-gold); }
+.period-summary.weighted-row {
+  border-top: 1px dashed rgba(255,255,255,0.12);
+  padding-top: 6px;
+  margin-top: 6px;
+}
 .period-date { color: var(--text-secondary); font-family: monospace; }
 .period-pillars { color: var(--accent-gold); font-family: monospace; margin-right: 4px; }
+
+/* 买卖方向 tag */
+.dir-tag {
+  font-size: 11px;
+  font-weight: bold;
+  padding: 1px 7px;
+  border-radius: 4px;
+  margin-left: 2px;
+}
+.dir-tag.dir-buy { background: rgba(244,67,54,0.25); color: #ff6b6b; }
+.dir-tag.dir-light { background: rgba(255,152,0,0.25); color: #ffb74d; }
+.dir-tag.dir-hold { background: rgba(158,158,158,0.2); color: #bdbdbd; }
+.dir-tag.dir-reduce { background: rgba(76,175,80,0.25); color: #81c784; }
+.dir-tag.dir-sell { background: rgba(67,160,71,0.35); color: #4caf50; }
+
+/* 黄历趋吉避凶 tag */
+.alm-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 2px;
+}
+.alm-tag.alm-evil {
+  background: rgba(156,39,176,0.25);
+  color: #ce93d8;
+  border: 1px solid rgba(156,39,176,0.4);
+}
+.alm-tag.alm-good {
+  background: rgba(33,150,243,0.15);
+  color: #64b5f6;
+}
+.alm-tag.alm-veto {
+  background: rgba(244,67,54,0.25);
+  color: #ef5350;
+  font-weight: bold;
+}
+
+/* 周期 chip 高亮 */
+.filter-chip.period-chip.active {
+  background: rgba(255,152,0,0.35);
+  color: #fff;
+}
 
 /* ── 结果行：月/周/日分项评分 + 市场标签 ── */
 .period-scores { display: flex; gap: 6px; margin: 6px 0 2px; flex-wrap: wrap; }
