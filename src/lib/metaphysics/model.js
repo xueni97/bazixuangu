@@ -741,12 +741,38 @@ export class YuanhaiDecisionModel {
       else if (ms <= -25) weightedScore -= 5  // 月级强卖点额外压制
     }
 
+    // 月级别否决权：月令为提纲，月级别不配合时强制压制日级别买点
+    // 月信号为"观望/减仓/卖出"时，无论日级别多强都不买入（规避系统性下跌次日）
     let action
+    let vetoed = false
+    if (periodDetail.monthly) {
+      const mAct = periodDetail.monthly.action
+      if (mAct === '卖出' || mAct === '减仓') {
+        // 月级别明确看空 → 强制观望，禁止买入
+        weightedScore = Math.min(weightedScore, -5)
+        vetoed = 'monthly_veto'
+      } else if (mAct === '观望') {
+        // 月级别观望 → 降级为轻仓试探，不重仓
+        if (weightedScore >= 20) weightedScore = 15
+        vetoed = 'monthly_caution'
+      }
+    }
+    // 周级别否决权：周信号明确看空时，禁止买入
+    if (periodDetail.weekly) {
+      const wAct = periodDetail.weekly.action
+      if (wAct === '卖出' || wAct === '减仓') {
+        weightedScore = Math.min(weightedScore, -3)
+        vetoed = vetoed || 'weekly_veto'
+      }
+    }
+
     if (weightedScore >= 20) action = '买入'
     else if (weightedScore >= 5) action = '轻仓试探'
     else if (weightedScore >= -10) action = '观望'
     else if (weightedScore >= -25) action = '减仓'
     else action = '卖出'
+
+    if (vetoed) allSignals.unshift(`[否决] ${vetoed}（月/周级别不配合，压制日买点）`)
 
     return {
       date: _fmtDate(dt),
@@ -755,6 +781,7 @@ export class YuanhaiDecisionModel {
       action,
       signals: allSignals,
       periodDetail,
+      vetoed: !!vetoed,
     }
   }
 }
