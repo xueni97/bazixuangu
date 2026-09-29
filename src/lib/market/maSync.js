@@ -13,7 +13,7 @@
 import * as db from '../storage/db.js'
 import { fetchSpot } from './spot.js'
 import { fetchSymbolKlines, fetchIndexKlines } from './kline.js'
-import { computeMaSnapshot } from './ma.js'
+import { computeMaSnapshot, aggregateWeekly } from './ma.js'
 
 const MA_WORKERS = 4 // 并发（过高触发数据源 IP 限流断连）
 // 覆盖率达标线：全市场天然存在次新股(<144根)/停牌/退市等无效标的，不可能100%有均线，
@@ -305,6 +305,55 @@ export async function syncMa(period = 'day', force = false) {
       st.phase = ''
       st.finishedAt = now()
       return { ok: true, message: `同步成功(server-db)，共${maRows.length}只` }
+    }
+
+    // server 模式周K：服务器无周K表，但 stock_kline 日K表已由 cron 拉好。
+    // 走批量 /api/klines/batch 拉日K → aggregateWeekly 聚合周K → computeMaSnapshot 算 MA144/288
+    // 彻底避开东财/腾讯/新浪周K接口（频发 501/201/限流）。
+    if (apiBase && period === 'week') {
+      const symbols = await db.getAllKeys('spot')
+      if (!symbols.length) throw new Error('股票标的为空，请先同步全市场快照')
+      const maRows = []
+      let pulled = 0
+      const CHUNK = 2000
+      st.total = symbols.length
+      st.done = 0
+      st.phase = `服务器周K聚合 0/${symbols.length}`
+      for (let i = 0; i < symbols.length; i += CHUNK) {
+        const chunk = symbols.slice(i, i + CHUNK)
+        try {
+          const r = await fetch(`${apiBase}/api/klines/batch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbols: chunk }),
+          })
+          const d = await r.json()
+          const map = (d && d.map) || {}
+          for (const sym of chunk) {
+            const dayBars = map[sym]
+            if (!Array.isArray(dayBars) || dayBars.length < 144) continue
+            const weekBars = aggregateWeekly(dayBars)
+            if (weekBars.length < 144) continue
+            const snap = computeMaSnapshot(sym, weekBars)
+            if (!snap) continue
+            snap.source = 'server-week-aggr'
+            maRows.push(snap)
+          }
+        } catch (e) { /* 块失败，后续块继续 */ }
+        pulled += chunk.length
+        st.done = pulled
+        st.phase = `服务器周K聚合 ${pulled}/${symbols.length}`
+      }
+      await db.replaceAll(cfg.store, maRows)
+      _maCount = maRows.length
+      if (tradeDate) {
+        await setMetaCached(cfg.dateKey, tradeDate)
+        await setMetaCached(cfg.atKey, `${dateStr()} ${now()}`)
+      }
+      st.status = 'idle'
+      st.phase = ''
+      st.finishedAt = now()
+      return { ok: true, message: `周K同步成功(server-aggr)，共${maRows.length}只` }
     }
 
     const symbols = await db.getAllKeys('spot')
