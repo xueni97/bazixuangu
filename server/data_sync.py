@@ -340,7 +340,7 @@ def _fetch_sina() -> list[tuple]:
 # 注意：东财对高并发会按 IP 临时断连限流，故 MA_WORKERS=4 且失败补拉。
 
 MA_WINDOWS = (144, 288)
-MA_KLINE_LMT = 320          # 288 均线 + 20 回踩窗口 + 余量
+MA_KLINE_LMT = 1500         # 日K 288 均线(320) + 周K 288 均线(1440日K) + 余量
 # 并发线程（过高会触发东财 IP 限流断连）；已在文件头部从 .env 读取，此处保留默认值兜底
 MA_RETRY = 3                # 单源网络错误重试次数（退避递增）
 MA_RETRY_PAUSE = (0.8, 1.8, 4.0)

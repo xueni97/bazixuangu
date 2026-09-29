@@ -24,9 +24,14 @@ export function recordId(signalDate, symbol) {
 /**
  * 纯函数：用日K（[[date, close], ...]）给一条 pending 记录结算。
  * 返回结算字段对象；尚不能结算返回 null。便于单测，无 IO 依赖。
+ *
+ * @param {object} rec 待结算记录
+ * @param {Array} klines 日K线
+ * @param {boolean} force 强制重算（已 settled 也重算，用于历史战绩修正）
  */
-export function evaluateNextBar(rec, klines) {
-  if (!rec || rec.status === 'settled') return null
+export function evaluateNextBar(rec, klines, force = false) {
+  if (!rec) return null
+  if (!force && rec.status === 'settled') return null
   if (!Array.isArray(klines) || !klines.length || rec.entryPrice == null) return null
   const sorted = klines
     .filter((k) => k && k[0] && k[1] != null)
@@ -121,11 +126,47 @@ export function removeRecord(id) {
 // ── 次日结算 ──────────────────────────────────────────────
 let _klineCache = new Map()
 
+// 多源兜底：①IndexedDB kline 仓库（maSync 缓存）→ ②服务器 API → ③网络兜底链
+// 任一源拿到 bars 即返回，并把成功结果回写 IndexedDB（仅网络兜底链结果回写）
 async function fetchKlines(symbol) {
   if (_klineCache.has(symbol)) return _klineCache.get(symbol)
-  const p = import('./market/kline.js')
-    .then(({ fetchSymbolKlines }) => fetchSymbolKlines(symbol, 'day'))
-    .catch(() => [])
+  const p = (async () => {
+    // ① IndexedDB kline 仓库（maSync 已缓存）
+    try {
+      const row = await db.get('kline', symbol)
+      if (row && Array.isArray(row.bars) && row.bars.length) return row.bars
+    } catch { /* 仓库不存在或读取失败，降级 */ }
+
+    // ② 服务器 API（VITE_API_BASE 配置时）
+    const apiBase = (import.meta.env && import.meta.env.VITE_API_BASE) || ''
+    if (apiBase) {
+      try {
+        const r = await fetch(`${apiBase}/api/klines?symbol=${encodeURIComponent(symbol)}`)
+        if (r.ok) {
+          const d = await r.json()
+          const bars = d && d.bars
+          if (Array.isArray(bars) && bars.length) return bars
+        }
+      } catch { /* 网络错误，降级 */ }
+    }
+
+    // ③ 网络兜底链：BaoStock→东财→腾讯→新浪
+    try {
+      const { fetchSymbolKlines } = await import('./market/kline.js')
+      const bars = await fetchSymbolKlines(symbol, 'day')
+      if (Array.isArray(bars) && bars.length) {
+        // 回写 IndexedDB 缓存（异步，不阻塞返回）
+        db.put('kline', {
+          symbol,
+          bars,
+          tradeDate: bars[bars.length - 1][0],
+          barsCount: bars.length,
+          updatedAt: Date.now(),
+        }).catch(() => {})
+      }
+      return bars
+    } catch { return [] }
+  })()
   _klineCache.set(symbol, p)
   return p
 }
@@ -137,13 +178,18 @@ async function fetchKlines(symbol) {
  * @param {function|null} onProgress - 进度回调(done, total)
  * @param {string|null} signalDate - 指定信号日（YYYY-MM-DD），仅结算该日分组；
  *        null = 全部分组（兼容旧调用）
+ * @param {boolean} force - 强制重算（含已 settled 记录），用于历史战绩一键结算
+ *        仅对历史信号日（< 最新交易日）生效，避免盘中重算造成虚假战绩
  */
-export async function settleWatchlist(onProgress = null, signalDate = null) {
+export async function settleWatchlist(onProgress = null, signalDate = null, force = false) {
   const recs = await listRecords()
   const latest = await db.getMeta('ma_trade_date')
+  // force 路径下放宽 latest 约束：用户主动点「重算战绩」按钮时，
+  // 已 settled 的历史记录 signalDate 可能 ≥ latest（ma 表未再同步），
+  // 不应被过滤——只要 signalDate 匹配就重算
   const pending = recs.filter((r) =>
-    r.status !== 'settled'
-    && (!latest || r.signalDate < latest)
+    (force || r.status !== 'settled')
+    && (force || !latest || r.signalDate < latest)
     && (!signalDate || r.signalDate === signalDate))
   if (!pending.length) return { checked: 0, settled: 0, win: 0, lose: 0, flat: 0, noData: 0 }
 
@@ -162,16 +208,21 @@ export async function settleWatchlist(onProgress = null, signalDate = null) {
   await Promise.all(Array.from({ length: Math.min(CONC, symbols.length) }, pull))
 
   let settled = 0, win = 0, lose = 0, flat = 0, noData = 0
+  let noEntry = 0, noKlines = 0, noNext = 0  // 诊断字段
   for (const rec of pending) {
-    const upd = evaluateNextBar(rec, klineMap[rec.symbol])
-    if (!upd) { noData++; continue }
+    const ks = klineMap[rec.symbol]
+    // 诊断：分别记录失败原因
+    if (!Array.isArray(ks) || !ks.length) { noKlines++; noData++; continue }
+    if (rec.entryPrice == null || !(rec.entryPrice > 0)) { noEntry++; noData++; continue }
+    const upd = evaluateNextBar(rec, ks, force)
+    if (!upd) { noNext++; noData++; continue }
     await db.put('watchlist', { ...rec, ...upd })
     settled++
     if (upd.result === 'win') win++
     else if (upd.result === 'lose') lose++
     else flat++
   }
-  return { checked: pending.length, settled, win, lose, flat, noData }
+  return { checked: pending.length, settled, win, lose, flat, noData, noEntry, noKlines, noNext }
 }
 
 // ── 盘中预览浮动（不写库） ─────────────────────────────────

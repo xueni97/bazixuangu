@@ -153,12 +153,9 @@
           </div>
           <div v-if="selectedMa.length || selectedMaWeek.length" class="filter-row">
             <span class="filter-label">回踩容差</span>
-            <select v-model="maTol" class="tol-select">
-              <option :value="0.01">±1%</option>
-              <option :value="0.03">±3%</option>
-              <option :value="0.05">±5%</option>
-            </select>
-            <span class="filter-hint">距离均线在此范围内，且前20日/周曾站上均线</span>
+            <van-stepper v-model="maTolPct" :min="1" :max="50" :step="1" integer
+              button-size="26" class="tol-stepper" />
+            <span class="filter-hint">距离均线 ±{{ maTolPct }}% 内，且前20日/周曾站上均线</span>
           </div>
           <div class="filter-row">
             <span class="filter-label">勾选阈值</span>
@@ -390,7 +387,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { showToast } from 'vant'
 import {
   scanStocks, searchStocks, getSectors, getSyncStatus, triggerSync, triggerMaSync,
@@ -422,6 +419,9 @@ const maxPrice = ref('')
 const selectedMa = ref([])
 const selectedMaWeek = ref([])
 const maTol = ref(0.03)
+// 容差百分比（整数 1-30），与 maTol 双向同步
+const maTolPct = ref(3)
+watch(maTolPct, (v) => { maTol.value = (v || 3) / 100 })
 // 错误页一键更新入口：maSyncPeriod='day'|'week'|null，spotNeeded=快照缺失
 const maSyncPeriod = ref(null)
 const spotNeeded = ref(false)
@@ -1150,6 +1150,7 @@ onUnmounted(() => stopSyncPolling())
 /* ── 勾选入池 ── */
 .title-hint { font-size: 11px; font-weight: normal; color: var(--text-secondary); margin-left: 8px; }
 .threshold-stepper { margin: 0 4px; flex-shrink: 0; }
+.tol-stepper { margin: 0 4px; flex-shrink: 0; }
 .stock-row.scan-pick-row { display: flex; align-items: flex-start; gap: 10px; }
 .row-check { padding-top: 2px; flex-shrink: 0; }
 .row-body { flex: 1; min-width: 0; }

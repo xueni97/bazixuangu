@@ -106,6 +106,16 @@
           :loading="groupSettling === g.date"
           @click.stop="onSettleGroup(g.date)"
         >一键结算</van-button>
+        <!-- 历史已结算分组：支持重算战绩（仅历史日期，避免盘中虚假战绩） -->
+        <van-button
+          v-else-if="g.settledN && isHistoricalGroup(g.date)"
+          size="mini"
+          type="primary"
+          plain
+          class="day-resettle-btn"
+          :loading="groupSettling === g.date"
+          @click.stop="onSettleGroup(g.date, true)"
+        >重算战绩</van-button>
       </div>
 
       <div v-show="openGroups.has(g.date)" class="day-body">
@@ -207,6 +217,7 @@ const previews = ref([])
 const previewing = ref(false)
 const refreshing = ref(false)
 const isPostMarket = ref(true)
+const latestTradeDate = ref('') // 最新交易日（用于判断历史分组，避免盘中重算）
 
 const groups = computed(() => groupRecords(records.value))
 const stats = computed(() => overallStats(records.value))
@@ -295,19 +306,24 @@ function toggleRec(id) {
 }
 
 // 单个信号日分组手动一键结算（用于补结算历史未结算分组，如多日未开 APP）
+// force=true 时重算已 settled 记录，用于历史战绩修正（避免盘中虚假战绩）
 const groupSettling = ref('')
-async function onSettleGroup(signalDate) {
+async function onSettleGroup(signalDate, force = false) {
   groupSettling.value = signalDate
   try {
     const r = await settleWatchlist(
       (done, total) => { progress.value = { done, total } },
       signalDate,
+      force,
     )
     records.value = await listRecords()
     if (!r.settled) {
-      showToast(`无可结算（数据未到或K线缺失），检查 ${r.noData} 条`)
+      const diag = force
+        ? `（无K线${r.noKlines || 0}/无入场价${r.noEntry || 0}/无次日K${r.noNext || 0}）`
+        : `（数据未到或K线缺失，检查 ${r.noData} 条）`
+      showToast(`无可结算${diag}`)
     } else {
-      showToast(`${signalDate} 分组结算完成：胜${r.win} 负${r.lose}${r.flat ? ` 平${r.flat}` : ''}`)
+      showToast(`${signalDate} 分组${force ? '重算' : '结算'}完成：胜${r.win} 负${r.lose}${r.flat ? ` 平${r.flat}` : ''}`)
     }
   } catch (e) {
     showToast('结算失败：' + (e.message || '本地数据异常'))
@@ -315,6 +331,13 @@ async function onSettleGroup(signalDate) {
     groupSettling.value = ''
     progress.value = { done: 0, total: 0 }
   }
+}
+
+// 历史分组：信号日 < 最新交易日（避免盘中重算造成虚假战绩）
+function isHistoricalGroup(dateStr) {
+  const latest = latestTradeDate.value
+  if (!latest) return false
+  return dateStr < latest
 }
 
 async function load(doSettle) {
@@ -390,6 +413,7 @@ async function doRefreshQuotes() {
 // 挂载逻辑：盘后自动结算，盘中仅列表+预览浮动
 onMounted(async () => {
   const maTradeDate = await getSignalDate()
+  latestTradeDate.value = maTradeDate || ''
   isPostMarket.value = isAfterMarketClose(maTradeDate)
   if (isPostMarket.value) {
     await load(true) // 盘后自动结算
@@ -542,6 +566,7 @@ async function onReEnter(r) {
   font-size: 13px;
 }
 .day-settle-btn { margin-left: auto; flex-shrink: 0; }
+.day-resettle-btn { margin-left: auto; flex-shrink: 0; }
 .day-arrow { color: var(--text-secondary); }
 .day-date { font-weight: bold; }
 .day-count { color: var(--text-secondary); font-size: 12px; }

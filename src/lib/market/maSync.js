@@ -13,7 +13,7 @@
 import * as db from '../storage/db.js'
 import { fetchSpot } from './spot.js'
 import { fetchSymbolKlines, fetchIndexKlines } from './kline.js'
-import { computeMaSnapshot } from './ma.js'
+import { computeMaSnapshot, aggregateWeekly } from './ma.js'
 
 const MA_WORKERS = 4 // 并发（过高触发数据源 IP 限流断连）
 // 覆盖率达标线：全市场天然存在次新股(<144根)/停牌/退市等无效标的，不可能100%有均线，
@@ -305,6 +305,135 @@ export async function syncMa(period = 'day', force = false) {
       st.phase = ''
       st.finishedAt = now()
       return { ok: true, message: `同步成功(server-db)，共${maRows.length}只` }
+    }
+
+    // server 模式周K：服务器无周K表，但 stock_kline 日K表已由 cron 拉好。
+    // 走批量 /api/klines/batch 拉日K → aggregateWeekly 聚合周K → computeMaSnapshot 算 MA144/288
+    // 彻底避开东财/腾讯/新浪周K接口（频发 501/201/限流）。
+    // 增量逻辑：用 meta 水位判断（不逐只比较 existing[s] !== tradeDate），
+    //   因为 snap.tradeDate（聚合后周K最后一根日K日期）和 latestTradeDate('week')
+    //   （指数周K日期）在周中不一致，逐只比较会导致每次都全量重拉。
+    // CHUNK=200：每批 ~25MB，避免响应体过大触发 ERR_CONTENT_LENGTH_MISMATCH
+    if (apiBase && period === 'week') {
+      const symbols = await db.getAllKeys('spot')
+      if (!symbols.length) throw new Error('股票标的为空，请先同步全市场快照')
+
+      // 增量判断：水位对齐即可跳过，不卡覆盖率
+      // 覆盖率不达标通常是次新股/停牌/退市等天然无效标的（<144根周K），
+      // 重拉也改善不了覆盖率，但每次触发全量重拉 5570 只，浪费几分钟。
+      // 水位对齐说明本周已聚合过，缺口是天然缺口，安全跳过。
+      const metaAligned = tradeDate && _metaCache[cfg.dateKey] === tradeDate
+      console.log('[周K增量判断]', {
+        tradeDate,
+        metaCacheDate: _metaCache[cfg.dateKey],
+        metaAligned,
+        maWeekCount: _maWeekCount,
+        spotCount: symbols.length,
+        coverage: symbols.length ? (_maWeekCount / symbols.length).toFixed(3) : 0,
+        force,
+        willSkip: !force && metaAligned,
+      })
+      if (!force && metaAligned) {
+        st.status = 'idle'
+        st.phase = ''
+        st.finishedAt = now()
+        return { ok: true, skipped: true, message: `${cfg.label}已为最新（${tradeDate}，${_maWeekCount}只，覆盖率${(symbols.length ? (_maWeekCount / symbols.length * 100).toFixed(1) : 0)}%）` }
+      }
+
+      const maRows = []
+      let pulled = 0
+      let diagNoBars = 0, diagShortBars = 0, diagShortWeek = 0, diagNoSnap = 0, diagOk = 0, diagShortFor288 = 0
+      let firstSampleLogged = false
+      const CHUNK = 200
+      st.total = symbols.length
+      st.done = 0
+      st.phase = `服务器周K聚合 0/${symbols.length}`
+      const fetchChunk = async (chunk) => {
+        try {
+          const r = await fetch(`${apiBase}/api/klines/batch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbols: chunk }),
+          })
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          const d = await r.json()
+          return (d && d.map) || {}
+        } catch (e) {
+          console.warn(`[周K聚合] batch 失败 (${chunk.length}只)，降级单只兜底`, e.message)
+          const m = {}
+          for (const sym of chunk) {
+            try {
+              const r2 = await fetch(`${apiBase}/api/klines?symbol=${encodeURIComponent(sym)}`)
+              if (r2.ok) {
+                const d2 = await r2.json()
+                if (d2 && Array.isArray(d2.bars)) m[sym] = d2.bars
+              }
+            } catch { /* 单只失败跳过 */ }
+          }
+          return m
+        }
+      }
+      for (let i = 0; i < symbols.length; i += CHUNK) {
+        const chunk = symbols.slice(i, i + CHUNK)
+        const map = await fetchChunk(chunk)
+        if (!firstSampleLogged) {
+          const sampleSym = chunk[0]
+          const sampleBars = map[sampleSym]
+          console.log('[周K聚合诊断]', {
+            chunkSize: chunk.length, mapKeysCount: Object.keys(map).length,
+            sampleSym, sampleBarsLen: Array.isArray(sampleBars) ? sampleBars.length : 0,
+          })
+          firstSampleLogged = true
+        }
+        for (const sym of chunk) {
+          const dayBars = map[sym]
+          if (!Array.isArray(dayBars) || !dayBars.length) { diagNoBars++; continue }
+          if (dayBars.length < 144) { diagShortBars++; continue }
+          // 288周K需要1440日K；不够的票ma288=null但仍可算ma144
+          if (dayBars.length < 1440) diagShortFor288++
+          const weekBars = aggregateWeekly(dayBars)
+          if (weekBars.length < 144) { diagShortWeek++; continue }
+          const snap = computeMaSnapshot(sym, weekBars)
+          if (!snap) { diagNoSnap++; continue }
+          snap.source = 'server-week-aggr'
+          maRows.push(snap)
+          diagOk++
+        }
+        pulled += chunk.length
+        st.done = pulled
+        st.phase = `服务器周K聚合 ${pulled}/${symbols.length}`
+      }
+      console.log('[周K聚合诊断汇总]', {
+        total: symbols.length, ok: diagOk,
+        noBars: diagNoBars, shortBars: diagShortBars,
+        shortWeek: diagShortWeek, noSnap: diagNoSnap,
+        shortFor288: diagShortFor288,  // 日K<1440(288周所需), 这些票ma288=null
+        maRowsLen: maRows.length,
+      })
+      // maRows 为空：服务器日K表空，明确提示
+      if (!maRows.length) {
+        st.status = 'failed'
+        st.phase = ''
+        st.finishedAt = now()
+        return {
+          ok: false,
+          message: `周K聚合 0 只：服务器日K表(stock_kline)为空或全失败。
+          请在服务器跑 nohup .venv/bin/python server/sync_once.py 拉日K后再试。
+          诊断：noBars=${diagNoBars} shortBars=${diagShortBars} shortWeek=${diagShortWeek} noSnap=${diagNoSnap}`,
+        }
+      }
+      // 周K全量替换（force 或非增量模式）
+      await db.replaceAll(cfg.store, maRows)
+      _maWeekCount = await db.count(cfg.store)
+      console.log('[周K聚合持久化校验]', { maRowsLen: maRows.length, dbCount: _maWeekCount })
+      if (tradeDate) {
+        await setMetaCached(cfg.dateKey, tradeDate)
+        await setMetaCached(cfg.atKey, `${dateStr()} ${now()}`)
+      }
+      st.status = 'idle'
+      st.phase = ''
+      st.finishedAt = now()
+      return { ok: true, message: `周K同步成功(server-aggr)，共${maRows.length}只` }
     }
 
     const symbols = await db.getAllKeys('spot')
