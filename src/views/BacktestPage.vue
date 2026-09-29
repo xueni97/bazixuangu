@@ -1,6 +1,14 @@
 <template>
   <div class="bt-page">
-    <van-nav-bar title="策略回测" left-arrow @click-left="$router.back()" />
+    <van-nav-bar title="策略回测" left-arrow @click-left="$router.back()">
+      <template #right>
+        <span class="ds-switch">
+          <span class="ds-label">数据源</span>
+          <van-button size="mini" :type="dataSource==='server'?'primary':'default'" @click="onSwitchDS('server')">服务器</van-button>
+          <van-button size="mini" :type="dataSource==='local'?'primary':'default'" @click="onSwitchDS('local')">直连</van-button>
+        </span>
+      </template>
+    </van-nav-bar>
 
     <!-- 模型定义区 -->
     <div class="section-card">
@@ -232,6 +240,15 @@ import { ref, reactive, onMounted, watch, nextTick } from 'vue'
 import { showToast } from 'vant'
 import { runBacktest } from '../lib/backtest/engine.js'
 import { drawEquityCurve, drawHistogram } from '../lib/backtest/canvasChart.js'
+import { getDataSource, setDataSource } from '../lib/market/maSync.js'
+
+// 数据源切换（server|local），写 localStorage 全局生效（回测引擎/扫描/同步共用）
+const dataSource = ref(getDataSource())
+function onSwitchDS(v) {
+  setDataSource(v)
+  dataSource.value = v
+  showToast(`数据源已切换为${v === 'server' ? '服务器' : '直连'}，下次回测生效`)
+}
 
 const periodOptions = [
   { value: 'monthly', label: '月' },
@@ -395,6 +412,8 @@ onMounted(() => {
 .up { color: #f44336; }
 .down { color: #4caf50; }
 .flat { color: #9e9e9e; }
+.ds-switch { display: inline-flex; align-items: center; gap: 4px; }
+.ds-label { font-size: 12px; color: #969799; margin-right: 2px; }
 
 .section-card {
   margin: 12px;

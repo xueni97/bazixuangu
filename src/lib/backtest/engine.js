@@ -13,6 +13,7 @@
 import * as db from '../storage/db.js'
 import { fetchSymbolKlines } from '../market/kline.js'
 import { computeMaSnapshot, nearMa, classifyMarket, classifyMaTrend, matchMaTrend, aggregateWeekly } from '../market/ma.js'
+import { currentApiBase } from '../market/maSync.js'
 import { StockImageryAnalyzer } from '../metaphysics/imagery.js'
 import { YuanhaiDecisionModel } from '../metaphysics/model.js'
 import {
@@ -159,11 +160,10 @@ export async function runBacktest(model, startDate, onProgress = null) {
   }
 
   // ── 阶段1：预拉K线 ──
-  // 三种数据源自动选择（构建期注入 VITE_API_BASE 决定）：
-  //   1. 远程模式：VITE_API_BASE 有值 → 优先 POST /api/klines/batch 一次批量拉
-  //      缺失再单只 GET /api/klines?symbol=xxx 兜底（服务器 cron 已拉好 SQLite）
-  //   2. 本地模式：无 VITE_API_BASE → 优先 IndexedDB kline 仓库（maSync 已缓存）
-  //      缺失才 4 并发 fetchSymbolKlines 网络兜底链 + 写回 kline 仓库
+  // 数据源跟随运行时切换（与扫描/同步一致，localStorage 'bazi_data_source'）：
+  //   server 模式：POST /api/klines/batch 批量拉服务器 SQLite（cron 已同步）
+  //   local 模式：优先 IndexedDB kline 仓库（maSync 已缓存），
+  //     缺失才 4 并发 fetchSymbolKlines 网络兜底链 + 写回 kline 仓库
   progress('fetching', 0, 1)
   const spotRows = await db.getAll('spot')
   const candidates = filterUniverse(spotRows, model)
@@ -171,15 +171,17 @@ export async function runBacktest(model, startDate, onProgress = null) {
     return makeEmptyResult(model, startDate, '无候选股票（检查筛选条件）')
   }
 
-  const API_BASE = (import.meta.env && import.meta.env.VITE_API_BASE) || ''
+  const API_BASE = currentApiBase()
   const klineMap = new Map()
   let cachedCount = 0
   let missing = candidates
 
   if (API_BASE) {
     // ── 远程模式：服务器 SQLite 直读 ──
-    // 一次 POST /api/klines/batch 拉全部候选（最多 2000 只）
-    const CHUNK = 2000
+    // POST /api/klines/batch 分批拉（CHUNK=200，每批 ~25MB；
+    // 2000 只一批响应体过大触发 ERR_CONTENT_LENGTH_MISMATCH 连接被切断，
+    // 且 catch 静默吞错导致 0 只命中误报"服务器缓存为空"）
+    const CHUNK = 200
     for (let i = 0; i < candidates.length; i += CHUNK) {
       const chunk = candidates.slice(i, i + CHUNK).map((c) => c.symbol)
       try {
@@ -188,6 +190,7 @@ export async function runBacktest(model, startDate, onProgress = null) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ symbols: chunk }),
         })
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
         const data = await resp.json()
         const map = (data && data.map) || {}
         for (const sym of chunk) {
@@ -198,7 +201,20 @@ export async function runBacktest(model, startDate, onProgress = null) {
           }
         }
       } catch (e) {
-        // 网络错误继续，下面单只兜底
+        console.warn(`[回测] batch ${chunk.length}只失败，本批降级单只兜底`, e.message)
+        // 本批降级单只兜底（不丢整批数据）
+        for (const sym of chunk) {
+          try {
+            const r = await fetch(`${API_BASE}/api/klines?symbol=${encodeURIComponent(sym)}`)
+            if (r.ok) {
+              const d = await r.json()
+              if (d && d.bars && d.bars.length >= MA_MIN_BARS) {
+                klineMap.set(sym, d.bars)
+                cachedCount++
+              }
+            }
+          } catch { /* 单只失败跳过 */ }
+        }
       }
       progress('fetching', Math.min(i + CHUNK, candidates.length), candidates.length)
     }

@@ -134,8 +134,8 @@ export function setDataSource(v) {
   try { localStorage.setItem('bazi_data_source', v) } catch (e) {}
 }
 
-/** 当前 API base（仅 server 模式有值）。 */
-function currentApiBase() {
+/** 当前 API base（仅 server 模式有值）。回测引擎等外部模块也用它跟随运行时切换。 */
+export function currentApiBase() {
   return getDataSource() === 'server' ? ENV_API_BASE : ''
 }
 
