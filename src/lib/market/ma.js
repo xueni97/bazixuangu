@@ -58,7 +58,10 @@ export function nearMa(price, ma, high20, tol) {
   if (!price || !ma || price <= 0) return [false, null]
   const dist = price / ma - 1.0
   if (Math.abs(dist) > tol + 1e-9) return [false, round4(dist)]
-  if (!high20 || high20 <= ma * (1 + tol)) return [false, round4(dist)]
+  // 回踩语义：前20日/周最高只要曾经站上过均线（high20 > ma）即可，
+  // 不要求 high20 > ma*(1+tol)（突破过 tol 以上）——对 288 周线等长周期均线，
+  // 前20周可能只略高于均线未达 +tol%，但仍是有效的"回踩"
+  if (!high20 || high20 <= ma) return [false, round4(dist)]
   return [true, round4(dist)]
 }
 
