@@ -342,7 +342,7 @@ export async function syncMa(period = 'day', force = false) {
 
       const maRows = []
       let pulled = 0
-      let diagNoBars = 0, diagShortBars = 0, diagShortWeek = 0, diagNoSnap = 0, diagOk = 0
+      let diagNoBars = 0, diagShortBars = 0, diagShortWeek = 0, diagNoSnap = 0, diagOk = 0, diagShortFor288 = 0
       let firstSampleLogged = false
       const CHUNK = 200
       st.total = symbols.length
@@ -389,6 +389,8 @@ export async function syncMa(period = 'day', force = false) {
           const dayBars = map[sym]
           if (!Array.isArray(dayBars) || !dayBars.length) { diagNoBars++; continue }
           if (dayBars.length < 144) { diagShortBars++; continue }
+          // 288周K需要1440日K；不够的票ma288=null但仍可算ma144
+          if (dayBars.length < 1440) diagShortFor288++
           const weekBars = aggregateWeekly(dayBars)
           if (weekBars.length < 144) { diagShortWeek++; continue }
           const snap = computeMaSnapshot(sym, weekBars)
@@ -405,6 +407,7 @@ export async function syncMa(period = 'day', force = false) {
         total: symbols.length, ok: diagOk,
         noBars: diagNoBars, shortBars: diagShortBars,
         shortWeek: diagShortWeek, noSnap: diagNoSnap,
+        shortFor288: diagShortFor288,  // 日K<1440(288周所需), 这些票ma288=null
         maRowsLen: maRows.length,
       })
       // maRows 为空：服务器日K表空，明确提示
