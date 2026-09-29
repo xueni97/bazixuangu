@@ -51,6 +51,23 @@
       <van-grid-item icon="chart-trending-o" text="策略回测" to="/backtest" />
     </van-grid>
 
+    <!-- 今日黄历趋吉避凶提示 -->
+    <div class="almanac-banner" :class="todayAlmanac?.inauspicious ? 'alm-evil' : 'alm-good'" v-if="todayAlmanac">
+      <div class="alm-head">
+        <span class="alm-icon">{{ todayAlmanac.inauspicious ? '⚠' : '✓' }}</span>
+        <span class="alm-title">{{ todayAlmanac.inauspicious ? '今日黄历凶日' : '今日黄历吉' }}</span>
+      </div>
+      <div class="alm-body" v-if="todayAlmanac.inauspicious">
+        <span v-for="r in todayAlmanac.reasons" :key="r" class="alm-reason">{{ r }}</span>
+      </div>
+      <div class="alm-body" v-else>
+        <span class="alm-reason">值星「{{ todayAlmanac.officer }}」宜开市交易</span>
+      </div>
+      <div class="alm-tip" v-if="todayAlmanac.inauspicious">
+        ⛔ 凶日不开新仓，已有买点信号应降级观望；详见股票扫描页综合方向
+      </div>
+    </div>
+
     <div class="quick-report" v-if="todayReport">
       <div class="report-title">今日速报</div>
       <div class="report-date">{{ todayReport.date }}</div>
@@ -89,6 +106,7 @@
 import { ref, onMounted, computed } from 'vue'
 import dayjs from 'dayjs'
 import { BaziEngine, YuanhaiDecisionModel, STEM_ELEMENT, BRANCH_ELEMENT, ELEMENT_CSS_MAP } from '../core'
+import { getAlmanac } from '../lib/metaphysics/almanac.js'
 
 const analysis = ref(null)
 const pillars = ref(null)
@@ -130,6 +148,11 @@ const actionClass = computed(() => {
   return 'action-try'
 })
 
+// 今日黄历趋吉避凶
+const todayAlmanac = computed(() => {
+  try { return getAlmanac(new Date()) } catch { return null }
+})
+
 onMounted(() => {
   const dt = new Date()
   pillars.value = BaziEngine.from_datetime(dt)
@@ -139,6 +162,43 @@ onMounted(() => {
 
 <style scoped>
 .home-page { padding-bottom: 40px; }
+
+/* 今日黄历趋吉避凶 banner */
+.almanac-banner {
+  margin: 12px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid;
+}
+.almanac-banner.alm-evil {
+  background: linear-gradient(135deg, rgba(156,39,176,0.18), rgba(244,67,54,0.08));
+  border-color: rgba(156,39,176,0.45);
+}
+.almanac-banner.alm-good {
+  background: rgba(33,150,243,0.10);
+  border-color: rgba(33,150,243,0.3);
+}
+.alm-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.alm-icon { font-size: 16px; }
+.alm-title { font-size: 14px; font-weight: bold; }
+.alm-evil .alm-title { color: #ce93d8; }
+.alm-good .alm-title { color: #64b5f6; }
+.alm-body { display: flex; gap: 6px; flex-wrap: wrap; }
+.alm-reason {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.08);
+}
+.alm-evil .alm-reason { color: #f8bbd0; }
+.alm-good .alm-reason { color: #90caf9; }
+.alm-tip {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #ef5350;
+  border-top: 1px dashed rgba(255,255,255,0.1);
+  padding-top: 6px;
+}
 
 .bazi-overview {
   margin: 12px;

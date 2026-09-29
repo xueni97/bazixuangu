@@ -20,7 +20,7 @@
       <div class="card">
         <div class="card-title">每日分解</div>
         <div v-for="(d, i) in weekly.dailyBreakdown" :key="i" class="day-row"
-          :class="{ best: d.date === weekly.bestDay.date }">
+          :class="{ best: d.date === weekly.bestDay.date, evil: isEvilDay(d.date) }">
           <div class="day-info">
             <span class="day-date">{{ d.date }}</span>
             <span class="day-weekday">{{ d.weekday }}</span>
@@ -29,6 +29,9 @@
           <div class="day-gods">
             <span v-for="e in d.useGods" :key="e" class="mini-tag" :class="'bg-' + e">{{ e }}</span>
             <span v-for="e in d.avoidGods" :key="'a'+e" class="mini-tag muted" :class="'bg-' + e">{{ e }}</span>
+            <span v-if="isEvilDay(d.date)" class="mini-tag evil-tag" :title="evilReasons(d.date)">
+              ⚠凶日
+            </span>
           </div>
           <div class="day-strength">{{ d.dayMasterStrength }}</div>
         </div>
@@ -39,6 +42,15 @@
         <div class="best-info">
           <van-icon name="certificate" color="#f5a623" size="20" />
           <span>{{ weekly.bestDay.date }} ({{ weekly.bestDay.weekday }})</span>
+        </div>
+      </div>
+
+      <div class="card evil-card" v-if="weekEvilDays.length">
+        <div class="card-title">⚠ 本周避凶日（择日学）</div>
+        <div class="evil-tip">以下日子命理信号即便看多也宜观望，不开新仓：</div>
+        <div v-for="d in weekEvilDays" :key="d.date" class="evil-row">
+          <span class="evil-date">{{ d.date }}</span>
+          <span class="evil-reasons">{{ d.reasons.join('、') }}</span>
         </div>
       </div>
 
@@ -56,6 +68,7 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { YuanhaiDecisionModel } from '../core'
+import { getAlmanac } from '../lib/metaphysics/almanac.js'
 
 const weekly = ref(null)
 
@@ -64,6 +77,32 @@ const weeklySectors = computed(() => {
   const sectors = YuanhaiDecisionModel._element_to_sectors(weekly.value.weekUseGods.slice(0, 3))
   return Object.entries(sectors).map(([elem, sectors]) => ({ elem, sectors }))
 })
+
+// 把 'YYYY-MM-DD' 字符串转成 Date（中午，避免夜子时偏移）
+function dtFromDateStr(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''))
+  if (!m) return new Date()
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0)
+}
+
+// 本周避凶日列表（基于 dailyBreakdown）
+const weekEvilDays = computed(() => {
+  if (!weekly.value?.dailyBreakdown) return []
+  const out = []
+  for (const d of weekly.value.dailyBreakdown) {
+    const alm = getAlmanac(dtFromDateStr(d.date))
+    if (alm.inauspicious) out.push({ date: d.date, reasons: alm.reasons, officer: alm.officer })
+  }
+  return out
+})
+
+function isEvilDay(dateStr) {
+  return weekEvilDays.value.some((d) => d.date === dateStr)
+}
+
+function evilReasons(dateStr) {
+  return weekEvilDays.value.find((d) => d.date === dateStr)?.reasons.join('、') || ''
+}
 
 onMounted(() => {
   weekly.value = YuanhaiDecisionModel.weekly_direction(new Date())
@@ -98,6 +137,31 @@ onMounted(() => {
   gap: 10px;
 }
 .day-row.best { background: rgba(245,166,35,0.08); border-radius: 8px; padding: 10px; }
+.day-row.evil { background: rgba(156,39,176,0.12); border-left: 3px solid #ab47bc; }
+.evil-tag {
+  background: rgba(156,39,176,0.3);
+  color: #ce93d8;
+  border: 1px solid rgba(156,39,176,0.5);
+  font-weight: bold;
+}
+
+/* 本周避凶日卡 */
+.evil-card {
+  border-color: rgba(156,39,176,0.4);
+  background: linear-gradient(135deg, rgba(156,39,176,0.10), rgba(244,67,54,0.04));
+}
+.evil-tip { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+.evil-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px dashed rgba(255,255,255,0.06);
+  font-size: 13px;
+}
+.evil-row:last-child { border-bottom: none; }
+.evil-date { font-family: monospace; color: #ce93d8; font-weight: bold; min-width: 90px; }
+.evil-reasons { color: #f8bbd0; }
 .day-info { min-width: 90px; }
 .day-date { font-size: 13px; }
 .day-weekday { font-size: 11px; color: var(--text-secondary); margin-left: 4px; }

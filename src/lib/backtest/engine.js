@@ -12,7 +12,7 @@
 
 import * as db from '../storage/db.js'
 import { fetchSymbolKlines } from '../market/kline.js'
-import { computeMaSnapshot, nearMa, classifyMarket } from '../market/ma.js'
+import { computeMaSnapshot, nearMa, classifyMarket, classifyMaTrend, matchMaTrend, aggregateWeekly } from '../market/ma.js'
 import { StockImageryAnalyzer } from '../metaphysics/imagery.js'
 import { YuanhaiDecisionModel } from '../metaphysics/model.js'
 import {
@@ -57,7 +57,8 @@ function filterUniverse(spotRows, model) {
  */
 function historicalScan(model, candidates, klineMap, imgCache, periodData, dt) {
   const dateStr = fmtDate(dt)
-  const { ma, maw, maTol } = model.params
+  const { ma, maw, maTol, weekPositions, ma144AbovePrice, ma144AboveMa288 } = model.params
+  const hasWeekFilter = (weekPositions && weekPositions.length) || ma144AbovePrice || ma144AboveMa288
   const results = []
   for (const c of candidates) {
     const klines = klineMap.get(c.symbol)
@@ -67,7 +68,7 @@ function historicalScan(model, candidates, klineMap, imgCache, periodData, dt) {
     if (sliced.length < MA_MIN_BARS) continue
     const maSnap = computeMaSnapshot(c.symbol, sliced)
     if (!maSnap) continue
-    // 均线过滤
+    // 均线过滤（日线）
     if (ma && ma.length) {
       let pass = true
       for (const w of ma) {
@@ -77,6 +78,32 @@ function historicalScan(model, candidates, klineMap, imgCache, periodData, dt) {
         if (!hit) { pass = false; break }
       }
       if (!pass) continue
+    }
+    // 周线均线过滤（maw 参数）
+    if (maw && maw.length) {
+      const weekKlines = aggregateWeekly(sliced)
+      if (weekKlines.length < MA_MIN_BARS) continue
+      const weekSnap = computeMaSnapshot(c.symbol, weekKlines)
+      if (!weekSnap) continue
+      let pass = true
+      for (const w of maw) {
+        const maVal = w === 288 ? weekSnap.ma288 : weekSnap.ma144
+        if (!maVal) { pass = false; break }
+        const [hit] = nearMa(weekSnap.close, maVal, weekSnap.high20, maTol || 0.03)
+        if (!hit) { pass = false; break }
+      }
+      if (!pass) continue
+    }
+    // 周线趋势细分过滤（避免下跌趋势）
+    if (hasWeekFilter) {
+      const weekKlines = aggregateWeekly(sliced)
+      if (weekKlines.length < MA_MIN_BARS) continue
+      const weekSnap = computeMaSnapshot(c.symbol, weekKlines)
+      if (!weekSnap || !weekSnap.ma288) continue
+      const trend = classifyMaTrend(
+        weekSnap.close, weekSnap.ma144, weekSnap.ma288, weekSnap.high20, maTol || 0.03,
+      )
+      if (!matchMaTrend(trend, weekPositions, ma144AbovePrice, ma144AboveMa288)) continue
     }
     // 取象 + 综合评分
     const img = imgCache.get(c.symbol)

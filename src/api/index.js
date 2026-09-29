@@ -19,6 +19,7 @@ import {
 import { nearMa, classifyMarket } from '../lib/market/ma.js'
 import { StockImageryAnalyzer } from '../lib/metaphysics/imagery.js'
 import { YuanhaiDecisionModel } from '../lib/metaphysics/model.js'
+import { getAlmanac } from '../lib/metaphysics/almanac.js'
 
 const PERIOD_LABELS = { monthly: '月', weekly: '周', daily: '日' }
 const PERIOD_WEIGHTS = { monthly: 0.5, weekly: 0.3, daily: 0.2 }
@@ -28,6 +29,12 @@ function pad2(n) { return String(n).padStart(2, '0') }
 function fmtDateTime(dt) {
   return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ` +
     `${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`
+}
+// 由 'YYYY-MM-DD' 字符串构造 Date（中午 12 点，避免夜子时偏移）
+function _dtFromDateStr(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''))
+  if (!m) return new Date()
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0)
 }
 
 /** 获取股票名称列表（全量，从行情快照取）。 */
@@ -83,12 +90,26 @@ export async function scanStocks(params = {}) {
   const periodData = YuanhaiDecisionModel.periodAnalyses(now)
   const dailyAnalysis = periodData.daily.analysis
 
+  // 各周期买卖方向（buyPointSignal 单点） + 黄历择日（趋吉避凶）
+  // periodData[k].pillars 已是该周期代表时点的四柱，复用避免重排
+  const periodSig = {}
+  const periodAlm = {}
+  for (const k of ['monthly', 'weekly', 'daily']) {
+    const pdt = _dtFromDateStr(periodData[k].date)
+    periodSig[k] = YuanhaiDecisionModel.buyPointSignal(pdt)
+    periodAlm[k] = getAlmanac(pdt)
+  }
+  // 综合方向（加权，已含黄历降级） + 当日黄历
+  const weightedSig = YuanhaiDecisionModel.weightedBuyPointSignal(now, selected)
+
   // 各周期元信息
   const periodMeta = []
   for (const k of ['monthly', 'weekly', 'daily']) {
     if (!selected.includes(k)) continue
     const pd = periodData[k]
     const an = pd.analysis
+    const sig = periodSig[k]
+    const alm = periodAlm[k]
     periodMeta.push({
       key: k,
       label: PERIOD_LABELS[k],
@@ -101,6 +122,14 @@ export async function scanStocks(params = {}) {
       avoidGods: an.avoidGods,
       useStems: an.useStems,
       toneStem: an.toneStem,
+      // 买卖方向 + 黄历凶日
+      direction: sig.action,
+      signalScore: sig.signalScore,
+      almanac: {
+        inauspicious: alm.inauspicious,
+        officer: alm.officer,
+        reasons: alm.reasons,
+      },
     })
   }
 
@@ -255,6 +284,15 @@ export async function scanStocks(params = {}) {
     toneGod: dailyAnalysis.toneGod,
     toneStem: dailyAnalysis.toneStem,
     periods: periodMeta,
+    // 综合方向（加权，已含黄历降级）+ 趋吉避凶展示
+    weightedAction: weightedSig.action,
+    weightedScore: weightedSig.signalScore,
+    weightedVetoed: weightedSig.vetoed,
+    weightedAlmanac: {
+      inauspicious: weightedSig.almanac?.inauspicious,
+      officer: weightedSig.almanac?.officer,
+      reasons: weightedSig.almanac?.reasons || [],
+    },
     maFilter: maWindows,
     maWeekFilter: maWeekWindows,
     maTol,

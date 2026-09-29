@@ -39,6 +39,15 @@
         </div>
       </div>
 
+      <div class="card evil-card" v-if="monthEvilDays.length">
+        <div class="card-title">⚠ 本月避凶日（择日学）</div>
+        <div class="evil-tip">本月共 {{ monthEvilDays.length }} 个凶日，命理信号即便看多也宜观望，不开新仓：</div>
+        <div v-for="d in monthEvilDays" :key="d.date" class="evil-row">
+          <span class="evil-date">{{ d.date }}</span>
+          <span class="evil-reasons">{{ d.reasons.join('、') }}</span>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-title">每周分解</div>
         <div v-for="(w, i) in monthly.weeklyBreakdown" :key="i" class="week-row">
@@ -62,10 +71,30 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { YuanhaiDecisionModel } from '../core'
+import { getAlmanac } from '../lib/metaphysics/almanac.js'
 
 const monthly = ref(null)
+
+// 扫描本月所有日，挑出凶日（四离/四绝/岁破/月破/凶值星）
+const monthEvilDays = computed(() => {
+  if (!monthly.value) return []
+  const out = []
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = now.getMonth() // 0-based
+  const daysInMonth = new Date(year, month + 1, 0).getDate()
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dt = new Date(year, month, d, 12, 0, 0, 0)
+    const alm = getAlmanac(dt)
+    if (alm.inauspicious) {
+      const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+      out.push({ date: dateStr, reasons: alm.reasons, officer: alm.officer })
+    }
+  }
+  return out
+})
 
 onMounted(() => {
   monthly.value = YuanhaiDecisionModel.monthly_direction(new Date())
@@ -84,6 +113,24 @@ onMounted(() => {
   margin-bottom: 12px;
 }
 .card-title { font-size: 15px; font-weight: bold; margin-bottom: 12px; }
+
+/* 本月避凶日卡 */
+.evil-card {
+  border-color: rgba(156,39,176,0.4);
+  background: linear-gradient(135deg, rgba(156,39,176,0.10), rgba(244,67,54,0.04));
+}
+.evil-tip { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+.evil-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px dashed rgba(255,255,255,0.06);
+  font-size: 13px;
+}
+.evil-row:last-child { border-bottom: none; }
+.evil-date { font-family: monospace; color: #ce93d8; font-weight: bold; min-width: 100px; }
+.evil-reasons { color: #f8bbd0; }
 
 .month-pillar-info { display: flex; gap: 20px; }
 .mp-item { display: flex; flex-direction: column; }
