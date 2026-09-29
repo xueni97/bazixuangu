@@ -126,11 +126,47 @@ export function removeRecord(id) {
 // ── 次日结算 ──────────────────────────────────────────────
 let _klineCache = new Map()
 
+// 多源兜底：①IndexedDB kline 仓库（maSync 缓存）→ ②服务器 API → ③网络兜底链
+// 任一源拿到 bars 即返回，并把成功结果回写 IndexedDB（仅网络兜底链结果回写）
 async function fetchKlines(symbol) {
   if (_klineCache.has(symbol)) return _klineCache.get(symbol)
-  const p = import('./market/kline.js')
-    .then(({ fetchSymbolKlines }) => fetchSymbolKlines(symbol, 'day'))
-    .catch(() => [])
+  const p = (async () => {
+    // ① IndexedDB kline 仓库（maSync 已缓存）
+    try {
+      const row = await db.get('kline', symbol)
+      if (row && Array.isArray(row.bars) && row.bars.length) return row.bars
+    } catch { /* 仓库不存在或读取失败，降级 */ }
+
+    // ② 服务器 API（VITE_API_BASE 配置时）
+    const apiBase = (import.meta.env && import.meta.env.VITE_API_BASE) || ''
+    if (apiBase) {
+      try {
+        const r = await fetch(`${apiBase}/api/klines?symbol=${encodeURIComponent(symbol)}`)
+        if (r.ok) {
+          const d = await r.json()
+          const bars = d && d.bars
+          if (Array.isArray(bars) && bars.length) return bars
+        }
+      } catch { /* 网络错误，降级 */ }
+    }
+
+    // ③ 网络兜底链：BaoStock→东财→腾讯→新浪
+    try {
+      const { fetchSymbolKlines } = await import('./market/kline.js')
+      const bars = await fetchSymbolKlines(symbol, 'day')
+      if (Array.isArray(bars) && bars.length) {
+        // 回写 IndexedDB 缓存（异步，不阻塞返回）
+        db.put('kline', {
+          symbol,
+          bars,
+          tradeDate: bars[bars.length - 1][0],
+          barsCount: bars.length,
+          updatedAt: Date.now(),
+        }).catch(() => {})
+      }
+      return bars
+    } catch { return [] }
+  })()
   _klineCache.set(symbol, p)
   return p
 }
