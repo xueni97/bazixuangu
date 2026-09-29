@@ -345,7 +345,7 @@ export async function syncMa(period = 'day', force = false) {
         st.phase = `服务器周K聚合 ${pulled}/${symbols.length}`
       }
       await db.replaceAll(cfg.store, maRows)
-      _maCount = maRows.length
+      _maWeekCount = maRows.length
       if (tradeDate) {
         await setMetaCached(cfg.dateKey, tradeDate)
         await setMetaCached(cfg.atKey, `${dateStr()} ${now()}`)
