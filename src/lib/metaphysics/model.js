@@ -773,6 +773,30 @@ export class YuanhaiDecisionModel {
     else if (weightedScore >= -25) action = '减仓'
     else action = '卖出'
 
+    // 卖出对称否决：月买入不能吞掉周/日卖点。
+    // 旧版否决权只压制买点，卖点被加权平均吞没——实测 09-07/09-28
+    // 周卖出(-30)+日卖出(-30) 仅因月买入(+30) 加权成"观望(-3)"，
+    // 下跌段持仓一只不卖，全靠止损逃命。
+    const wAct = periodDetail.weekly && periodDetail.weekly.action
+    const dAct = periodDetail.daily && periodDetail.daily.action
+    if (action === '买入' || action === '轻仓试探' || action === '观望') {
+      if (wAct === '卖出' && dAct === '卖出') {
+        // 周日双卖出 → 强制清仓信号
+        action = '卖出'
+        weightedScore = Math.min(weightedScore, -30)
+        vetoed = vetoed || 'sell_veto'
+      } else if (wAct === '卖出' || (wAct === '减仓' && dAct === '减仓')) {
+        // 周卖出（或周周日日双减仓）→ 减仓
+        action = '减仓'
+        weightedScore = Math.min(weightedScore, -15)
+        vetoed = vetoed || 'sell_veto'
+      } else if (dAct === '卖出' || dAct === '减仓') {
+        // 仅日级卖点：不清仓（月买入代表中期趋势未坏），但至少观望不追
+        action = '观望'
+        weightedScore = Math.min(weightedScore, 0)
+      }
+    }
+
     // 黄历凶日降级：四离/四绝/岁破/月破/凶值星 → 不宜开市交易
     // 命理信号即便"买入"也要降级为"观望"，不入池
     const alm = getAlmanac(dt)

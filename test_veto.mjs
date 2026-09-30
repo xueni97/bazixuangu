@@ -1,7 +1,7 @@
 import { YuanhaiDecisionModel } from './src/lib/metaphysics/model.js'
 import { getAlmanac } from './src/lib/metaphysics/almanac.js'
 
-for (const d of ['2026-09-17', '2026-09-22', '2026-09-23', '2026-09-28']) {
+for (const d of ['2026-09-17', '2026-09-22', '2026-09-23', '2026-09-28', '2026-09-07', '2026-08-18']) {
   const dt = new Date(d + 'T12:00:00')
   const sig = YuanhaiDecisionModel.weightedBuyPointSignal(dt)
   const alm = getAlmanac(dt)
