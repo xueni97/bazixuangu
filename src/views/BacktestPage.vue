@@ -133,6 +133,24 @@
         <span class="param-hint">高点回撤超此值出场，让利润奔跑（0 = 禁用）</span>
       </div>
 
+      <!-- 信号卖出范围 -->
+      <div class="filter-row">
+        <span class="filter-label">信号卖出范围</span>
+        <div class="chip-row">
+          <button
+            class="chip"
+            :class="{ active: model.signalSellLosersOnly !== false }"
+            @click="model.signalSellLosersOnly = true"
+          >仅清浮亏</button>
+          <button
+            class="chip"
+            :class="{ active: model.signalSellLosersOnly === false }"
+            @click="model.signalSellLosersOnly = false"
+          >全清</button>
+        </div>
+        <span class="param-hint">仅清浮亏：浮盈票交给移动止盈管理，不被信号截断</span>
+      </div>
+
       <!-- 仓位管理 -->
       <div class="filter-row">
         <span class="filter-label">仓位上限%</span>
@@ -345,6 +363,7 @@ const model = reactive({
   stopLossPct: 8,   // 强制止损%（0 = 禁用）
   takeProfitPct: 15, // 强制止盈%（0 = 禁用）
   trailingPct: 5,   // 移动止盈：高点回撤%（0 = 禁用）——盈亏比倒置对策
+  signalSellLosersOnly: true, // 信号卖出仅清浮亏票（浮盈票交给移动止盈）
   maxSinglePct: 20,  // 单票仓位上限%（占总资产）
   maxPositionPct: 95, // 总仓位上限%（留现金缓冲）
   almanacEveSell: true, // 凶日前一交易日收盘强制清仓

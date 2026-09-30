@@ -354,6 +354,8 @@ export async function runBacktest(model, startDate, onProgress = null) {
   }
   log(`仓位：单票 ≤${maxSinglePct}% / 总仓位 ≤${maxPositionPct}%` +
       `（佣金0.025%双边+印花税0.05%卖出）`)
+  // 选股门槛实际生效值打印——避免与已保存模型列表混淆（同一页可存多条模型）
+  log(`选股门槛：综合分 ≥${model.threshold} · 买入上限 ${model.topN} 只 · 起始 ${startDate}`)
 
   for (let i = 0; i < total; i++) {
     const dateStr = calendar[i]
@@ -376,28 +378,12 @@ export async function runBacktest(model, startDate, onProgress = null) {
       return ans >= 0 ? Number(klines[ans][1]) || 0 : 0
     }
 
-    // 先卖（按卖出策略 exitStrategy: signal|holdDays|both）
-    // signal: 仅按买点信号里的卖出/减仓动作清仓
-    // holdDays: 仅按持仓天数到期卖出，忽略信号
-    // both: 两者任一触发即卖（取早）
+    // ── 卖出规则（按用户定版优先级逐日执行，同票先触发先出场）──
+    // 止损 > 移动止盈 > 信号卖出 > 止盈 > 持仓到期（凶日避险无条件最高）
     const exitStrategy = model.exitStrategy || 'both'
-    let soldSignal = 0, soldExpired = 0
-    if ((exitStrategy === 'signal' || exitStrategy === 'both')
-        && ['卖出', '减仓'].includes(signal.action)) {
-      const sells = sellAll(pf, closeOf, dateStr, 'signal')
-      trades.push(...sells.map((t) => ({ ...t, type: 'sell' })))
-      soldSignal = sells.length
-    }
-    if (exitStrategy === 'holdDays' || exitStrategy === 'both') {
-      const expired = [...pf.positions.values()].filter((p) => p.holdDays >= model.holdDays)
-      for (const p of expired) {
-        const t = sell(pf, p.symbol, closeOf(p.symbol), dateStr, 'expired')
-        if (t) { trades.push({ ...t, type: 'sell' }); soldExpired++ }
-      }
-    }
-    // 强制止损/止盈/移动止盈（0 = 禁用）
-    // 盈亏比倒置对策：固定止损+低胜率时赚小亏大，trailing 让盈利单奔跑——
-    // 高点回撤超 trailingPct 才出场，替代"涨到 X% 立即了结"
+
+    // 1. 止损 / 移动止盈 / 止盈（价格规则，同循环内 reason 按优先级标注）
+    // 盈亏比倒置对策：trailing 让盈利单奔跑，高点回撤超阈值才出场
     let soldStop = 0
     if (stopLossPct > 0 || takeProfitPct > 0 || trailingPct > 0) {
       for (const [sym, p] of [...pf.positions]) {
@@ -410,12 +396,39 @@ export async function runBacktest(model, startDate, onProgress = null) {
         const drawdown = ((price - (p.highPrice || p.entryPrice)) / (p.highPrice || p.entryPrice)) * 100
         let reason = null
         if (stopLossPct > 0 && pnl <= -stopLossPct) reason = 'stopLoss'
-        else if (takeProfitPct > 0 && pnl >= takeProfitPct) reason = 'takeProfit'
         else if (trailingPct > 0 && drawdown <= -trailingPct) reason = 'trailing'
+        else if (takeProfitPct > 0 && pnl >= takeProfitPct) reason = 'takeProfit'
         if (reason) {
           const t = sell(pf, sym, price, dateStr, reason)
           if (t) { trades.push({ ...t, type: 'sell' }); soldStop++ }
         }
+      }
+    }
+
+    // 2. 信号卖出：默认只清浮亏/平盘票（signalSellLosersOnly）。
+    // 浮盈票不被周/日翻空截断利润，交给移动止盈管理高点回撤——
+    // "刚有浮盈就信号清仓、利润被提前截断"的对策。
+    // 浮盈票若信号持续翻空转为浮亏，次日自然被清，逻辑自洽。
+    let soldSignal = 0
+    if ((exitStrategy === 'signal' || exitStrategy === 'both')
+        && ['卖出', '减仓'].includes(signal.action)) {
+      for (const [sym, p] of [...pf.positions]) {
+        const price = closeOf(sym)
+        if (!(price > 0)) continue
+        const pnl = ((price - p.entryPrice) / p.entryPrice) * 100
+        if (model.signalSellLosersOnly !== false && pnl > 0) continue
+        const t = sell(pf, sym, price, dateStr, 'signal')
+        if (t) { trades.push({ ...t, type: 'sell' }); soldSignal++ }
+      }
+    }
+
+    // 3. 持仓到期
+    let soldExpired = 0
+    if (exitStrategy === 'holdDays' || exitStrategy === 'both') {
+      const expired = [...pf.positions.values()].filter((p) => p.holdDays >= model.holdDays)
+      for (const p of expired) {
+        const t = sell(pf, p.symbol, closeOf(p.symbol), dateStr, 'expired')
+        if (t) { trades.push({ ...t, type: 'sell' }); soldExpired++ }
       }
     }
     // 凶日前一交易日强制避险卖出（择日学：四离/四绝/岁破/月破等凶日不开新仓、
