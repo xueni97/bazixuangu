@@ -124,6 +124,24 @@
         <span class="param-hint">0 = 禁用</span>
       </div>
 
+      <!-- 凶日前避险 -->
+      <div class="filter-row">
+        <span class="filter-label">凶日前避险</span>
+        <div class="chip-row">
+          <button
+            class="chip"
+            :class="{ active: model.almanacEveSell }"
+            @click="model.almanacEveSell = true"
+          >开</button>
+          <button
+            class="chip"
+            :class="{ active: model.almanacEveSell === false }"
+            @click="model.almanacEveSell = false"
+          >关</button>
+        </div>
+        <span class="param-hint">四离/四绝/岁破/月破前一日收盘强制清仓，当日禁买</span>
+      </div>
+
       <!-- 起始日期 -->
       <div class="filter-row">
         <span class="filter-label">起始日</span>
@@ -303,6 +321,7 @@ const model = reactive({
   exitStrategy: 'both',
   stopLossPct: 8,   // 强制止损%（0 = 禁用）
   takeProfitPct: 15, // 强制止盈%（0 = 禁用）
+  almanacEveSell: true, // 凶日前一交易日收盘强制清仓
   initialCapital: 1000000,
   startDate: getDefaultStartDate(),
 })
@@ -337,7 +356,7 @@ function exitLabel(v) {
   return opt ? opt.label : '两者结合'
 }
 
-const REASON_LABELS = { signal: '信号卖出', expired: '到期卖出', stopLoss: '止损', takeProfit: '止盈' }
+const REASON_LABELS = { signal: '信号卖出', expired: '到期卖出', stopLoss: '止损', takeProfit: '止盈', almanacEve: '凶日前避险' }
 function reasonLabel(v) {
   return REASON_LABELS[v] || v || '—'
 }

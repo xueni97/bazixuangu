@@ -16,6 +16,7 @@ import { computeMaSnapshot, nearMa, classifyMarket, classifyMaTrend, matchMaTren
 import { currentApiBase } from '../market/maSync.js'
 import { StockImageryAnalyzer } from '../metaphysics/imagery.js'
 import { YuanhaiDecisionModel } from '../metaphysics/model.js'
+import { getAlmanac } from '../metaphysics/almanac.js'
 import {
   createPortfolio, buy, sell, sellAll, tickHoldDays, markToMarket,
 } from './portfolio.js'
@@ -401,6 +402,22 @@ export async function runBacktest(model, startDate, onProgress = null) {
         }
       }
     }
+    // 凶日前一交易日强制避险卖出（择日学：四离/四绝/岁破/月破等凶日不开新仓、
+    // 持仓过凶日风险大，提前一日收盘离场）。同时当日禁止再买入——否则卖出后
+    // 立即买回新票，等于持仓过凶日，避险失效。
+    let soldAlmanacEve = 0
+    const nextDateStr = calendar[i + 1]
+    let nextInauspicious = false
+    if (nextDateStr && model.almanacEveSell !== false) {
+      const [ny, nm, nd] = nextDateStr.split('-').map(Number)
+      const alm = getAlmanac(new Date(ny, nm - 1, nd, 12))
+      nextInauspicious = !!(alm && alm.inauspicious)
+      if (nextInauspicious && pf.positions.size) {
+        const sells = sellAll(pf, closeOf, dateStr, 'almanacEve')
+        trades.push(...sells.map((t) => ({ ...t, type: 'sell' })))
+        soldAlmanacEve = sells.length
+      }
+    }
 
     tickHoldDays(pf)
 
@@ -408,7 +425,7 @@ export async function runBacktest(model, startDate, onProgress = null) {
     // 剩余现金分给空位（budget = cash/slots，滚动满仓语义）
     let boughtCount = 0
     let candidateN = null, qualifiedN = null
-    if (['买入', '轻仓试探'].includes(signal.action)) {
+    if (!nextInauspicious && ['买入', '轻仓试探'].includes(signal.action)) {
       const slots = model.topN - pf.positions.size
       if (slots > 0) {
         const periodData = YuanhaiDecisionModel.periodAnalyses(dt)
@@ -453,10 +470,11 @@ export async function runBacktest(model, startDate, onProgress = null) {
     const almStr = signal.almanac && signal.almanac.inauspicious
       ? ` [黄历凶:${(signal.almanac.reasons || []).join('/')}]` : ''
     log(`${dateStr} 信号=${signal.action}(${signal.signalScore}) ${pdStr}${almStr}` +
-        (candidateN != null ? ` 候选${candidateN}/达标${qualifiedN}` : ' 未选票') +
+        (candidateN != null ? ` 候选${candidateN}/达标${qualifiedN}` : (nextInauspicious ? ' 次日凶日' : ' 未选票')) +
         (soldSignal ? ` 信号卖出${soldSignal}` : '') +
         (soldExpired ? ` 到期卖出${soldExpired}` : '') +
         (soldStop ? ` 止损止盈${soldStop}` : '') +
+        (soldAlmanacEve ? ` 凶日前避险${soldAlmanacEve}` : '') +
         (boughtCount ? ` 买入${boughtCount}只` : '') +
         ` 持仓${pf.positions.size} 现金${Math.round(pf.cash)} 净值${mtm.totalReturn}%`)
     if (i % 5 === 0) progress('backtesting', i + 1, total)
