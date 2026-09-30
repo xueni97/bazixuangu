@@ -7,6 +7,12 @@
 
 const LOT = 100 // A 股最小交易单位
 
+// 交易费用（A 股真实费率）：
+// - 佣金：万 2.5 双边（含过户费简化）
+// - 印花税：0.05% 仅卖出（2023-08 减半后税率）
+const COMMISSION_PCT = 0.025
+const STAMP_PCT = 0.05
+
 /**
  * 创建空持仓。
  * @param {number} initialCapital - 初始资金
@@ -28,9 +34,12 @@ export function createPortfolio(initialCapital = 1000000) {
  */
 export function buy(pf, pick, budget) {
   if (!pick || !(pick.price > 0) || budget <= 0) return null
+  // 同票重复买入保护：positions.set 会覆盖旧仓，旧 shares 的资金凭空蒸发
+  // （真 bug：旧版达标票已持仓时再次 buy 直接覆盖，资金守恒被破坏）
+  if (pf.positions.has(pick.symbol)) return null
   const shares = Math.floor(budget / pick.price / LOT) * LOT
   if (shares <= 0) return null
-  const cost = shares * pick.price
+  const cost = shares * pick.price * (1 + COMMISSION_PCT / 100)
   if (cost > pf.cash) return null
   pf.cash -= cost
   const pos = {
@@ -38,9 +47,11 @@ export function buy(pf, pick, budget) {
     name: pick.name || pick.symbol,
     shares,
     entryPrice: pick.price,
+    entryCost: Math.round(cost), // 含佣金总成本
     entryDate: pick.date,
     score: pick.score ?? null,
     holdDays: 0,
+    highPrice: pick.price, // 移动止盈锚点：持仓期间最高价
   }
   pf.positions.set(pick.symbol, pos)
   return pos
@@ -58,10 +69,14 @@ export function buy(pf, pick, budget) {
 export function sell(pf, symbol, price, date, reason = 'signal') {
   const pos = pf.positions.get(symbol)
   if (!pos || !(price > 0)) return null
-  const proceeds = pos.shares * price
+  // 卖出净额 = 市值 - 佣金 - 印花税
+  const marketVal = pos.shares * price
+  const proceeds = marketVal * (1 - (COMMISSION_PCT + STAMP_PCT) / 100)
   pf.cash += proceeds
   pf.positions.delete(symbol)
-  const pnlPct = Math.round(((price - pos.entryPrice) / pos.entryPrice) * 10000) / 100
+  // 净盈亏 = (卖出净额 - 买入总成本) / 买入总成本
+  const cost = pos.entryCost || pos.shares * pos.entryPrice
+  const pnlPct = Math.round(((proceeds - cost) / cost) * 10000) / 100
   return {
     symbol: pos.symbol,
     name: pos.name,

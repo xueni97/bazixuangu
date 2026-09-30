@@ -121,7 +121,30 @@
           <span class="param-label">止盈</span>
           <van-stepper v-model="model.takeProfitPct" :min="0" :max="100" integer />
         </div>
-        <span class="param-hint">0 = 禁用</span>
+        <span class="param-hint">0 = 禁用；波段持仓建议止盈≤20，50+ 在5天周期内基本无效</span>
+      </div>
+
+      <!-- 移动止盈 -->
+      <div class="filter-row">
+        <span class="filter-label">移动止盈%</span>
+        <div class="param-item">
+          <van-stepper v-model="model.trailingPct" :min="0" :max="50" integer />
+        </div>
+        <span class="param-hint">高点回撤超此值出场，让利润奔跑（0 = 禁用）</span>
+      </div>
+
+      <!-- 仓位管理 -->
+      <div class="filter-row">
+        <span class="filter-label">仓位上限%</span>
+        <div class="param-item">
+          <span class="param-label">单票</span>
+          <van-stepper v-model="model.maxSinglePct" :min="5" :max="100" :step="5" integer />
+        </div>
+        <div class="param-item">
+          <span class="param-label">总仓</span>
+          <van-stepper v-model="model.maxPositionPct" :min="10" :max="100" :step="5" integer />
+        </div>
+        <span class="param-hint">单票≤总资产X%；总仓≤X%留现金缓冲</span>
       </div>
 
       <!-- 凶日前避险 -->
@@ -321,6 +344,9 @@ const model = reactive({
   exitStrategy: 'both',
   stopLossPct: 8,   // 强制止损%（0 = 禁用）
   takeProfitPct: 15, // 强制止盈%（0 = 禁用）
+  trailingPct: 5,   // 移动止盈：高点回撤%（0 = 禁用）——盈亏比倒置对策
+  maxSinglePct: 20,  // 单票仓位上限%（占总资产）
+  maxPositionPct: 95, // 总仓位上限%（留现金缓冲）
   almanacEveSell: true, // 凶日前一交易日收盘强制清仓
   initialCapital: 1000000,
   startDate: getDefaultStartDate(),
@@ -356,7 +382,7 @@ function exitLabel(v) {
   return opt ? opt.label : '两者结合'
 }
 
-const REASON_LABELS = { signal: '信号卖出', expired: '到期卖出', stopLoss: '止损', takeProfit: '止盈', almanacEve: '凶日前避险' }
+const REASON_LABELS = { signal: '信号卖出', expired: '到期卖出', stopLoss: '止损', takeProfit: '止盈', trailing: '移动止盈', almanacEve: '凶日前避险' }
 function reasonLabel(v) {
   return REASON_LABELS[v] || v || '—'
 }

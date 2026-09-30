@@ -116,6 +116,7 @@ function historicalScan(model, candidates, klineMap, imgCache, periodData, dt) {
       name: c.name,
       score: info.score,
       price: maSnap.close,
+      stem: img.primaryStem, // 十干类象：同质化去重用（行业数据缺失的近似）
     })
   }
   return results
@@ -341,10 +342,18 @@ export async function runBacktest(model, startDate, onProgress = null) {
   // 强制止损/止盈阈值（%，0 = 禁用）
   const stopLossPct = Number(model.stopLossPct) || 0
   const takeProfitPct = Number(model.takeProfitPct) || 0
+  // 移动止盈：高点回撤超此值出场（0 = 禁用）——盈亏比倒置对策
+  const trailingPct = Number(model.trailingPct) || 0
+  // 仓位管理：单票上限%（默认20）、总仓位上限%（默认95）
+  const maxSinglePct = Number(model.maxSinglePct) || 20
+  const maxPositionPct = Number(model.maxPositionPct) || 95
   if (stopLossPct > 0 || takeProfitPct > 0) {
     log(`风控：强制止损 ${stopLossPct > 0 ? '-' + stopLossPct + '%' : '禁用'}` +
-        ` / 止盈 ${takeProfitPct > 0 ? '+' + takeProfitPct + '%' : '禁用'}`)
+        ` / 止盈 ${takeProfitPct > 0 ? '+' + takeProfitPct + '%' : '禁用'}` +
+        ` / 移动止盈 ${trailingPct > 0 ? '高点回撤-' + trailingPct + '%' : '禁用'}`)
   }
+  log(`仓位：单票 ≤${maxSinglePct}% / 总仓位 ≤${maxPositionPct}%` +
+      `（佣金0.025%双边+印花税0.05%卖出）`)
 
   for (let i = 0; i < total; i++) {
     const dateStr = calendar[i]
@@ -386,16 +395,23 @@ export async function runBacktest(model, startDate, onProgress = null) {
         if (t) { trades.push({ ...t, type: 'sell' }); soldExpired++ }
       }
     }
-    // 强制止损/止盈（0 = 禁用），任一策略触发即强平
+    // 强制止损/止盈/移动止盈（0 = 禁用）
+    // 盈亏比倒置对策：固定止损+低胜率时赚小亏大，trailing 让盈利单奔跑——
+    // 高点回撤超 trailingPct 才出场，替代"涨到 X% 立即了结"
     let soldStop = 0
-    if (stopLossPct > 0 || takeProfitPct > 0) {
+    if (stopLossPct > 0 || takeProfitPct > 0 || trailingPct > 0) {
       for (const [sym, p] of [...pf.positions]) {
         const price = closeOf(sym)
         if (!(price > 0)) continue
+        if (trailingPct > 0 && price > (p.highPrice || p.entryPrice)) {
+          p.highPrice = price // 更新持仓期间最高价
+        }
         const pnl = ((price - p.entryPrice) / p.entryPrice) * 100
+        const drawdown = ((price - (p.highPrice || p.entryPrice)) / (p.highPrice || p.entryPrice)) * 100
         let reason = null
         if (stopLossPct > 0 && pnl <= -stopLossPct) reason = 'stopLoss'
         else if (takeProfitPct > 0 && pnl >= takeProfitPct) reason = 'takeProfit'
+        else if (trailingPct > 0 && drawdown <= -trailingPct) reason = 'trailing'
         if (reason) {
           const t = sell(pf, sym, price, dateStr, reason)
           if (t) { trades.push({ ...t, type: 'sell' }); soldStop++ }
@@ -434,11 +450,32 @@ export async function runBacktest(model, startDate, onProgress = null) {
         const qualified = allPicks
           .filter((p) => p.score >= model.threshold)
           .sort((a, b) => b.score - a.score)
+        // 已持仓票不重复买（buy 层也有保护，双保险）
+        // 同质化去重：同天干类象（行业数据缺失的近似）每日最多 2 只，
+        // 避免"一堆智能类小票"高度相关、板块下跌集体回撤
+        const stemCount = new Map()
+        const picks = []
+        for (const p of qualified) {
+          if (picks.length >= slots) break
+          if (pf.positions.has(p.symbol)) continue
+          const c = stemCount.get(p.stem) || 0
+          if (c >= 2) continue
+          stemCount.set(p.stem, c + 1)
+          picks.push(p)
+        }
         qualifiedN = qualified.length
-        const picks = qualified.slice(0, slots)
         if (picks.length) {
-          const budget = pf.cash / slots
+          // 三重预算上限（亏损放大器对策）：
+          // 1. 现金均分空位；2. 单票 ≤ 总资产 maxSinglePct%；3. 买入后总仓位 ≤ maxPositionPct%
+          const mtm0 = markToMarket(pf, closeOf)
+          const perSlot = Math.min(
+            pf.cash / picks.length,
+            (mtm0.totalValue * maxSinglePct) / 100,
+            Math.max(0, (mtm0.totalValue * maxPositionPct) / 100 - mtm0.positionValue) / picks.length,
+          )
           for (const p of picks) {
+            const budget = Math.min(perSlot, pf.cash)
+            if (budget <= 0) break
             const pos = buy(pf, { ...p, date: dateStr }, budget)
             if (pos) {
               boughtCount++
@@ -446,7 +483,7 @@ export async function runBacktest(model, startDate, onProgress = null) {
               trades.push({
                 type: 'buy', symbol: p.symbol, name: p.name,
                 date: dateStr, price: p.price,
-                shares: pos.shares, cost: Math.round(pos.shares * pos.entryPrice),
+                shares: pos.shares, cost: pos.entryCost,
                 score: p.score,
               })
             }
