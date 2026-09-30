@@ -121,18 +121,32 @@ function historicalScan(model, candidates, klineMap, imgCache, periodData, dt) {
 }
 
 /**
- * 构建交易日历：取所有K线日期的交集∩，过滤≥startDate。
+ * 日期标准化：'YYYY-MM-DD'（容错 '/' 分隔符与时间后缀，如东财 '2026-01-05 00:00:00'）。
+ * 防止个别票格式不同污染交易日历。
+ */
+function normDate(d) {
+  if (typeof d !== 'string') return null
+  const s = d.replace('/', '-').split(' ')[0]
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null
+}
+
+/**
+ * 构建交易日历：取所有K线日期的并集∪（当天有票交易即为交易日），过滤≥startDate。
+ *
+ * 旧版用全票严格交集：5000+ 只票任何一只日期格式异常/数据损坏/窗口错开，
+ * 交集即清空 → 误报"交易日历为空"（即使数据齐全）。
+ * 并集语义正确：日历只决定"回测哪些天"，某票当日停牌无K线时
+ * historicalScan 里按该票自己的 sliced 截断判断，自然跳过，无副作用。
  */
 function buildTradingCalendar(klineMap, startDate) {
-  let cal = null
+  const cal = new Set()
   for (const klines of klineMap.values()) {
     if (!klines || klines.length < MA_MIN_BARS) continue
-    const dates = klines.map((k) => k[0]).filter((d) => d >= startDate)
-    if (!dates.length) continue
-    if (cal == null) cal = new Set(dates)
-    else cal = new Set([...cal].filter((d) => new Set(dates).has(d)))
+    for (const k of klines) {
+      const d = normDate(k && k[0])
+      if (d && d >= startDate) cal.add(d)
+    }
   }
-  if (!cal || !cal.size) return []
   return [...cal].sort()
 }
 
@@ -284,6 +298,16 @@ export async function runBacktest(model, startDate, onProgress = null) {
     }
   }
   progress('fetching', candidates.length, candidates.length)
+
+  // 统一标准化所有K线：日期 normDate（容错格式/时间后缀）、收盘 Number
+  // 后续 sliced 截断、MA 计算、日历构建全部依赖字符串日期比较，必须先洗干净
+  for (const [sym, bars] of klineMap) {
+    const cleaned = bars
+      .map((k) => [normDate(k && k[0]), Number(k && k[1])])
+      .filter((k) => k[0] && Number.isFinite(k[1]) && k[1] > 0)
+    if (cleaned.length >= MA_MIN_BARS) klineMap.set(sym, cleaned)
+    else klineMap.delete(sym)
+  }
   // 进度备注：本地缓存 N 只 / 兜底拉 M 只
   if (onProgress) {
     onProgress({ phase: 'fetching', done: candidates.length, total: candidates.length, cached: cachedCount, missing: missing.length })
