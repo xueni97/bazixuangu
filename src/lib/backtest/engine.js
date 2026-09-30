@@ -337,6 +337,13 @@ export async function runBacktest(model, startDate, onProgress = null) {
   const trades = []
   const equityCurve = []
   const total = calendar.length
+  // 强制止损/止盈阈值（%，0 = 禁用）
+  const stopLossPct = Number(model.stopLossPct) || 0
+  const takeProfitPct = Number(model.takeProfitPct) || 0
+  if (stopLossPct > 0 || takeProfitPct > 0) {
+    log(`风控：强制止损 ${stopLossPct > 0 ? '-' + stopLossPct + '%' : '禁用'}` +
+        ` / 止盈 ${takeProfitPct > 0 ? '+' + takeProfitPct + '%' : '禁用'}`)
+  }
 
   for (let i = 0; i < total; i++) {
     const dateStr = calendar[i]
@@ -345,12 +352,18 @@ export async function runBacktest(model, startDate, onProgress = null) {
     // 信号（月0.5/周0.3/日0.2加权，月买点力量最大，不再只看日买点）
     const signal = YuanhaiDecisionModel.weightedBuyPointSignal(dt, model.params.periods)
 
-    // 收盘价查询函数
+    // 收盘价查询：当日精确匹配；停牌/缺数据回退最近收盘价（last价惯例）。
+    // 旧版精确匹配失败返回 0 → 卖出失败+持仓市值归零 → 总收益-99.88%假象
+    // 且持仓永远卖不掉（交易 0 笔）。二分查找 O(log n)。
     const closeOf = (sym) => {
       const klines = klineMap.get(sym)
-      if (!klines) return 0
-      const row = klines.find((k) => k[0] === dateStr)
-      return row && row[1] != null ? Number(row[1]) : 0
+      if (!klines || !klines.length) return 0
+      let lo = 0, hi = klines.length - 1, ans = -1
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1
+        if (klines[mid][0] <= dateStr) { ans = mid; lo = mid + 1 } else hi = mid - 1
+      }
+      return ans >= 0 ? Number(klines[ans][1]) || 0 : 0
     }
 
     // 先卖（按卖出策略 exitStrategy: signal|holdDays|both）
@@ -372,6 +385,22 @@ export async function runBacktest(model, startDate, onProgress = null) {
         if (t) { trades.push(t); soldExpired++ }
       }
     }
+    // 强制止损/止盈（0 = 禁用），任一策略触发即强平
+    let soldStop = 0
+    if (stopLossPct > 0 || takeProfitPct > 0) {
+      for (const [sym, p] of [...pf.positions]) {
+        const price = closeOf(sym)
+        if (!(price > 0)) continue
+        const pnl = ((price - p.entryPrice) / p.entryPrice) * 100
+        let reason = null
+        if (stopLossPct > 0 && pnl <= -stopLossPct) reason = 'stopLoss'
+        else if (takeProfitPct > 0 && pnl >= takeProfitPct) reason = 'takeProfit'
+        if (reason) {
+          const t = sell(pf, sym, price, dateStr, reason)
+          if (t) { trades.push(t); soldStop++ }
+        }
+      }
+    }
 
     tickHoldDays(pf)
 
@@ -385,15 +414,18 @@ export async function runBacktest(model, startDate, onProgress = null) {
         .slice(0, model.topN)
 
       if (picks.length) {
-        const budget = pf.cash / picks.length
+        // 等权分仓：每次买入预算 = 现金 / 买入数上限(topN)。
+        // 旧版 cash/picks.length——当日只选出1只就把全仓打入，
+        // 现金耗尽后永远买不进（分仓语义完全失效）。
+        const budget = pf.cash / Math.max(1, model.topN)
         for (const p of picks) {
-          buy(pf, { ...p, date: dateStr }, budget)
+          const pos = buy(pf, { ...p, date: dateStr }, budget)
+          if (pos) boughtCount++  // 只计真实成交（资金不足 buy 返回 null）
         }
-        boughtCount = picks.length
       }
     }
     // 仅记录有交易的日子，避免日志爆炸
-    if (soldSignal || soldExpired || boughtCount) {
+    if (soldSignal || soldExpired || soldStop || boughtCount) {
       // 月/周/日分项信号（月买点力量最大）
       const pd = signal.periodDetail || {}
       const pdStr = ['monthly', 'weekly', 'daily']
@@ -403,6 +435,7 @@ export async function runBacktest(model, startDate, onProgress = null) {
       log(`${dateStr} 信号=${signal.action}(${signal.signalScore}) ${pdStr}` +
           (soldSignal ? ` 信号卖出${soldSignal}` : '') +
           (soldExpired ? ` 到期卖出${soldExpired}` : '') +
+          (soldStop ? ` 止损止盈${soldStop}` : '') +
           (boughtCount ? ` 买入${boughtCount}只` : '') +
           ` 持仓${pf.positions.size} 现金${Math.round(pf.cash)}`)
     }

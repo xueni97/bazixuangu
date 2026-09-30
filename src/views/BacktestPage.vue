@@ -110,6 +110,20 @@
         </div>
       </div>
 
+      <!-- 强制止损/止盈 -->
+      <div class="filter-row">
+        <span class="filter-label">强制止损/止盈%</span>
+        <div class="param-item">
+          <span class="param-label">止损</span>
+          <van-stepper v-model="model.stopLossPct" :min="0" :max="50" integer />
+        </div>
+        <div class="param-item">
+          <span class="param-label">止盈</span>
+          <van-stepper v-model="model.takeProfitPct" :min="0" :max="100" integer />
+        </div>
+        <span class="param-hint">0 = 禁用</span>
+      </div>
+
       <!-- 起始日期 -->
       <div class="filter-row">
         <span class="filter-label">起始日</span>
@@ -222,7 +236,7 @@
             <span class="t-date">{{ t.entryDate }}→{{ t.exitDate }}</span>
             <span class="t-hold">{{ t.holdDays }}天</span>
             <span class="t-pnl" :class="pnlClass(t.pnlPct)">{{ fmt(t.pnlPct) }}%</span>
-            <span class="t-reason">{{ t.exitReason }}</span>
+            <span class="t-reason">{{ reasonLabel(t.exitReason) }}</span>
           </div>
         </div>
       </div>
@@ -279,6 +293,8 @@ const model = reactive({
   topN: 10,
   holdDays: 5,
   exitStrategy: 'both',
+  stopLossPct: 8,   // 强制止损%（0 = 禁用）
+  takeProfitPct: 15, // 强制止盈%（0 = 禁用）
   initialCapital: 1000000,
   startDate: getDefaultStartDate(),
 })
@@ -311,6 +327,11 @@ function toggleArr(arr, val) {
 function exitLabel(v) {
   const opt = exitStrategyOptions.find((o) => o.value === v)
   return opt ? opt.label : '两者结合'
+}
+
+const REASON_LABELS = { signal: '信号卖出', expired: '到期卖出', stopLoss: '止损', takeProfit: '止盈' }
+function reasonLabel(v) {
+  return REASON_LABELS[v] || v || '—'
 }
 
 function fmt(v) {
@@ -465,6 +486,7 @@ onMounted(() => {
 }
 .param-item { display: flex; align-items: center; gap: 6px; }
 .param-label { font-size: 12px; color: var(--text-secondary); min-width: 60px; }
+.param-hint { font-size: 11px; color: var(--text-tertiary, #999); }
 
 .btn-row { display: flex; gap: 10px; margin-top: 10px; }
 
