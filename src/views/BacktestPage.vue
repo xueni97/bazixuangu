@@ -227,16 +227,24 @@
       <!-- 交易明细 -->
       <div class="section-card">
         <div class="card-title" @click="showTrades = !showTrades">
-          交易明细（{{ result.trades.length }}笔）
+          交易明细（买{{ result.stats.buyCount ?? 0 }}/卖{{ result.stats.tradeCount }}）
           <van-icon :name="showTrades ? 'arrow-up' : 'arrow-down'" class="ml-auto" />
         </div>
         <div v-show="showTrades" class="trades-list">
-          <div v-for="(t, i) in result.trades" :key="i" class="trade-row">
+          <div v-for="(t, i) in result.trades" :key="i" class="trade-row" :class="{ 'trade-buy': t.type === 'buy' }">
             <span class="t-name">{{ t.name }}</span>
-            <span class="t-date">{{ t.entryDate }}→{{ t.exitDate }}</span>
-            <span class="t-hold">{{ t.holdDays }}天</span>
-            <span class="t-pnl" :class="pnlClass(t.pnlPct)">{{ fmt(t.pnlPct) }}%</span>
-            <span class="t-reason">{{ reasonLabel(t.exitReason) }}</span>
+            <template v-if="t.type === 'buy'">
+              <span class="t-date">{{ t.date }} 买入</span>
+              <span class="t-hold">{{ t.shares }}股</span>
+              <span class="t-pnl flat">{{ t.cost }}元</span>
+              <span class="t-reason">评分{{ t.score }}</span>
+            </template>
+            <template v-else>
+              <span class="t-date">{{ t.entryDate }}→{{ t.exitDate }}</span>
+              <span class="t-hold">{{ t.holdDays }}天</span>
+              <span class="t-pnl" :class="pnlClass(t.pnlPct)">{{ fmt(t.pnlPct) }}%</span>
+              <span class="t-reason">{{ reasonLabel(t.exitReason) }}</span>
+            </template>
           </div>
         </div>
       </div>
@@ -528,6 +536,7 @@ onMounted(() => {
   border-bottom: 1px dashed rgba(255,255,255,0.04);
 }
 .t-name { min-width: 60px; font-weight: bold; }
+.trade-buy .t-name { color: #ff9800; }
 .t-date { color: var(--text-secondary); font-size: 11px; }
 .t-hold { color: var(--text-secondary); }
 .t-pnl { font-weight: bold; min-width: 50px; text-align: right; }

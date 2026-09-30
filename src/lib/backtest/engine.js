@@ -375,14 +375,14 @@ export async function runBacktest(model, startDate, onProgress = null) {
     if ((exitStrategy === 'signal' || exitStrategy === 'both')
         && ['卖出', '减仓'].includes(signal.action)) {
       const sells = sellAll(pf, closeOf, dateStr, 'signal')
-      trades.push(...sells)
+      trades.push(...sells.map((t) => ({ ...t, type: 'sell' })))
       soldSignal = sells.length
     }
     if (exitStrategy === 'holdDays' || exitStrategy === 'both') {
       const expired = [...pf.positions.values()].filter((p) => p.holdDays >= model.holdDays)
       for (const p of expired) {
         const t = sell(pf, p.symbol, closeOf(p.symbol), dateStr, 'expired')
-        if (t) { trades.push(t); soldExpired++ }
+        if (t) { trades.push({ ...t, type: 'sell' }); soldExpired++ }
       }
     }
     // 强制止损/止盈（0 = 禁用），任一策略触发即强平
@@ -397,52 +397,68 @@ export async function runBacktest(model, startDate, onProgress = null) {
         else if (takeProfitPct > 0 && pnl >= takeProfitPct) reason = 'takeProfit'
         if (reason) {
           const t = sell(pf, sym, price, dateStr, reason)
-          if (t) { trades.push(t); soldStop++ }
+          if (t) { trades.push({ ...t, type: 'sell' }); soldStop++ }
         }
       }
     }
 
     tickHoldDays(pf)
 
-    // 后买
+    // 后买：总持仓数硬上限 = topN（旧版无上限，持仓能涨到 17 只超 topN=5），
+    // 剩余现金分给空位（budget = cash/slots，滚动满仓语义）
     let boughtCount = 0
+    let candidateN = null, qualifiedN = null
     if (['买入', '轻仓试探'].includes(signal.action)) {
-      const periodData = YuanhaiDecisionModel.periodAnalyses(dt)
-      const picks = historicalScan(model, validCandidates, klineMap, imgCache, periodData, dt)
-        .filter((p) => p.score >= model.threshold)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, model.topN)
-
-      if (picks.length) {
-        // 等权分仓：每次买入预算 = 现金 / 买入数上限(topN)。
-        // 旧版 cash/picks.length——当日只选出1只就把全仓打入，
-        // 现金耗尽后永远买不进（分仓语义完全失效）。
-        const budget = pf.cash / Math.max(1, model.topN)
-        for (const p of picks) {
-          const pos = buy(pf, { ...p, date: dateStr }, budget)
-          if (pos) boughtCount++  // 只计真实成交（资金不足 buy 返回 null）
+      const slots = model.topN - pf.positions.size
+      if (slots > 0) {
+        const periodData = YuanhaiDecisionModel.periodAnalyses(dt)
+        const allPicks = historicalScan(model, validCandidates, klineMap, imgCache, periodData, dt)
+        candidateN = allPicks.length
+        const qualified = allPicks
+          .filter((p) => p.score >= model.threshold)
+          .sort((a, b) => b.score - a.score)
+        qualifiedN = qualified.length
+        const picks = qualified.slice(0, slots)
+        if (picks.length) {
+          const budget = pf.cash / slots
+          for (const p of picks) {
+            const pos = buy(pf, { ...p, date: dateStr }, budget)
+            if (pos) {
+              boughtCount++
+              // 买入明细记录（交易明细买卖都显示）
+              trades.push({
+                type: 'buy', symbol: p.symbol, name: p.name,
+                date: dateStr, price: p.price,
+                shares: pos.shares, cost: Math.round(pos.shares * pos.entryPrice),
+                score: p.score,
+              })
+            }
+          }
         }
       }
-    }
-    // 仅记录有交易的日子，避免日志爆炸
-    if (soldSignal || soldExpired || soldStop || boughtCount) {
-      // 月/周/日分项信号（月买点力量最大）
-      const pd = signal.periodDetail || {}
-      const pdStr = ['monthly', 'weekly', 'daily']
-        .filter((p) => pd[p])
-        .map((p) => `${p === 'monthly' ? '月' : p === 'weekly' ? '周' : '日'}${pd[p].action}(${pd[p].signalScore})`)
-        .join(' ')
-      log(`${dateStr} 信号=${signal.action}(${signal.signalScore}) ${pdStr}` +
-          (soldSignal ? ` 信号卖出${soldSignal}` : '') +
-          (soldExpired ? ` 到期卖出${soldExpired}` : '') +
-          (soldStop ? ` 止损止盈${soldStop}` : '') +
-          (boughtCount ? ` 买入${boughtCount}只` : '') +
-          ` 持仓${pf.positions.size} 现金${Math.round(pf.cash)}`)
     }
 
     // 记录净值
     const mtm = markToMarket(pf, closeOf)
     equityCurve.push({ date: dateStr, ...mtm })
+
+    // 每日日志（全量，回测日志可折叠展示）：
+    // 月/周/日分项信号 + 黄历降级 + 候选/达标数 + 买卖数 + 持仓/现金/净值
+    // 起始日到首笔交易的空窗原因直接体现在逐日信号里
+    const pd = signal.periodDetail || {}
+    const pdStr = ['monthly', 'weekly', 'daily']
+      .filter((p) => pd[p])
+      .map((p) => `${p === 'monthly' ? '月' : p === 'weekly' ? '周' : '日'}${pd[p].action}(${pd[p].signalScore})`)
+      .join(' ')
+    const almStr = signal.almanac && signal.almanac.inauspicious
+      ? ` [黄历凶:${(signal.almanac.reasons || []).join('/')}]` : ''
+    log(`${dateStr} 信号=${signal.action}(${signal.signalScore}) ${pdStr}${almStr}` +
+        (candidateN != null ? ` 候选${candidateN}/达标${qualifiedN}` : ' 未选票') +
+        (soldSignal ? ` 信号卖出${soldSignal}` : '') +
+        (soldExpired ? ` 到期卖出${soldExpired}` : '') +
+        (soldStop ? ` 止损止盈${soldStop}` : '') +
+        (boughtCount ? ` 买入${boughtCount}只` : '') +
+        ` 持仓${pf.positions.size} 现金${Math.round(pf.cash)} 净值${mtm.totalReturn}%`)
     if (i % 5 === 0) progress('backtesting', i + 1, total)
   }
   progress('backtesting', total, total)
@@ -478,6 +494,8 @@ export async function runBacktest(model, startDate, onProgress = null) {
  * 计算统计指标。
  */
 function computeStats(trades, equityCurve, initialCapital) {
+  // 只用卖出配对记录算统计（买入记录 type='buy' 仅展示用）
+  const sells = trades.filter((t) => t.type !== 'buy')
   const totalReturn = equityCurve.length
     ? equityCurve[equityCurve.length - 1].totalReturn
     : 0
@@ -489,15 +507,15 @@ function computeStats(trades, equityCurve, initialCapital) {
     : 0
 
   // 胜率
-  const wins = trades.filter((t) => t.pnlPct > 0).length
-  const losses = trades.filter((t) => t.pnlPct < 0).length
-  const winRate = trades.length
-    ? Math.round((wins / trades.length) * 1000) / 10
+  const wins = sells.filter((t) => t.pnlPct > 0).length
+  const losses = sells.filter((t) => t.pnlPct < 0).length
+  const winRate = sells.length
+    ? Math.round((wins / sells.length) * 1000) / 10
     : null
 
   // 平均持仓天数
-  const avgHold = trades.length
-    ? Math.round((trades.reduce((s, t) => s + t.holdDays, 0) / trades.length) * 10) / 10
+  const avgHold = sells.length
+    ? Math.round((sells.reduce((s, t) => s + t.holdDays, 0) / sells.length) * 10) / 10
     : null
 
   // 最大回撤
@@ -517,7 +535,8 @@ function computeStats(trades, equityCurve, initialCapital) {
     winRate,
     avgHold,
     maxDrawdown,
-    tradeCount: trades.length,
+    tradeCount: sells.length,
+    buyCount: trades.length - sells.length,
     buyDays: equityCurve.filter((p, i) => i > 0 && p.totalValue !== equityCurve[i - 1].totalValue).length,
   }
 }
