@@ -9,6 +9,7 @@
  */
 
 import * as db from './storage/db.js'
+import { currentApiBase } from './market/maSync.js'
 
 const FLAT_EPS = 0.01 // |涨跌幅%| 小于此值记平
 
@@ -126,31 +127,41 @@ export function removeRecord(id) {
 // ── 次日结算 ──────────────────────────────────────────────
 let _klineCache = new Map()
 
-// 多源兜底：①IndexedDB kline 仓库（maSync 缓存）→ ②服务器 API → ③网络兜底链
-// 任一源拿到 bars 即返回，并把成功结果回写 IndexedDB（仅网络兜底链结果回写）
-async function fetchKlines(symbol) {
-  if (_klineCache.has(symbol)) return _klineCache.get(symbol)
+// 多源兜底：①IndexedDB kline 仓库（maSync 缓存）→ ②服务器 API → ③网络直连兜底链
+// 关键：每个源都必须"覆盖所需日期"（含 needAfterDate 之后的K线）才采用，
+// 否则源①的陈旧缓存（bars 恰好止于信号日）会短路返回，导致误报"K线不全无法结算"。
+// 网络直连结果回写 IndexedDB（下次免拉）。
+async function fetchKlines(symbol, needAfterDate = null) {
+  // 有效且覆盖所需日期
+  const covers = (bars) => Array.isArray(bars) && bars.length
+    && (!needAfterDate || bars.some((k) => k && k[0] > needAfterDate))
+
+  // 会话缓存：覆盖所需日期才复用，否则继续往下兜底
+  if (_klineCache.has(symbol)) {
+    const cached = await _klineCache.get(symbol)
+    if (covers(cached)) return cached
+  }
+
   const p = (async () => {
-    // ① IndexedDB kline 仓库（maSync 已缓存）
+    // ① IndexedDB kline 仓库（maSync 已缓存；陈旧则跳过）
     try {
       const row = await db.get('kline', symbol)
-      if (row && Array.isArray(row.bars) && row.bars.length) return row.bars
+      if (row && covers(row.bars)) return row.bars
     } catch { /* 仓库不存在或读取失败，降级 */ }
 
-    // ② 服务器 API（VITE_API_BASE 配置时）
-    const apiBase = (import.meta.env && import.meta.env.VITE_API_BASE) || ''
+    // ② 服务器 API（跟随运行时数据源切换）
+    const apiBase = currentApiBase()
     if (apiBase) {
       try {
         const r = await fetch(`${apiBase}/api/klines?symbol=${encodeURIComponent(symbol)}`)
         if (r.ok) {
           const d = await r.json()
-          const bars = d && d.bars
-          if (Array.isArray(bars) && bars.length) return bars
+          if (covers(d && d.bars)) return d.bars
         }
       } catch { /* 网络错误，降级 */ }
     }
 
-    // ③ 网络兜底链：BaoStock→东财→腾讯→新浪
+    // ③ 网络直连兜底链：BaoStock→东财→腾讯→新浪（历史未结算自选的直连兜底）
     try {
       const { fetchSymbolKlines } = await import('./market/kline.js')
       const bars = await fetchSymbolKlines(symbol, 'day')
@@ -163,8 +174,9 @@ async function fetchKlines(symbol) {
           barsCount: bars.length,
           updatedAt: Date.now(),
         }).catch(() => {})
+        return bars
       }
-      return bars
+      return []
     } catch { return [] }
   })()
   _klineCache.set(symbol, p)
@@ -193,15 +205,20 @@ export async function settleWatchlist(onProgress = null, signalDate = null, forc
     && (!signalDate || r.signalDate === signalDate))
   if (!pending.length) return { checked: 0, settled: 0, win: 0, lose: 0, flat: 0, noData: 0 }
 
-  const symbols = [...new Set(pending.map((r) => r.symbol))]
+  // 每只票所需覆盖的最大信号日（保证其所有记录都能找到次日K线）
+  const needAfter = {}
+  for (const r of pending) {
+    if (!needAfter[r.symbol] || r.signalDate > needAfter[r.symbol]) needAfter[r.symbol] = r.signalDate
+  }
+  const symbols = Object.keys(needAfter)
   const CONC = 4
-  // 先把各票日K拉全（4 并发，会话缓存）
+  // 先把各票日K拉全（4 并发，会话缓存；要求覆盖信号日之后）
   const klineMap = {}
   let cursor = 0
   const pull = async () => {
     while (cursor < symbols.length) {
       const sym = symbols[cursor++]
-      klineMap[sym] = await fetchKlines(sym)
+      klineMap[sym] = await fetchKlines(sym, needAfter[sym])
       if (onProgress) onProgress(cursor, symbols.length)
     }
   }
