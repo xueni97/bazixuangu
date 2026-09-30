@@ -54,10 +54,13 @@ export function computeMaSnapshot(symbol, klines) {
  *    即股价是从上方跌回均线，而非一直在线下徘徊。
  * 返回 [是否命中, 距离比例 price/ma-1]；缺数据返回 [false, null]。
  */
-export function nearMa(price, ma, high20, tol) {
+export function nearMa(price, ma, high20, tol, tolDown = null) {
   if (!price || !ma || price <= 0) return [false, null]
   const dist = price / ma - 1.0
-  if (Math.abs(dist) > tol + 1e-9) return [false, round4(dist)]
+  // 容差上下分开：上方（price>ma）用 tol，下方用 tolDown（缺省=tol 对称，向后兼容）。
+  // 回踩场景：允许股价在均线上方 5% 以内、下方 2% 以内 → tol=0.05, tolDown=0.02
+  const down = tolDown == null ? tol : tolDown
+  if (dist > tol + 1e-9 || dist < -down - 1e-9) return [false, round4(dist)]
   // 回踩语义：前20日/周最高只要曾经站上过均线（high20 > ma）即可，
   // 不要求 high20 > ma*(1+tol)（突破过 tol 以上）——对 288 周线等长周期均线，
   // 前20周可能只略高于均线未达 +tol%，但仍是有效的"回踩"

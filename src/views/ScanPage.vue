@@ -153,9 +153,17 @@
           </div>
           <div v-if="selectedMa.length || selectedMaWeek.length" class="filter-row">
             <span class="filter-label">回踩容差</span>
-            <van-stepper v-model="maTolPct" :min="1" :max="50" :step="1" integer
-              button-size="26" class="tol-stepper" />
-            <span class="filter-hint">距离均线 ±{{ maTolPct }}% 内，且前20日/周曾站上均线</span>
+            <div class="param-item">
+              <span class="param-label">线上</span>
+              <van-stepper v-model="maTolUpPct" :min="1" :max="50" :step="1" integer
+                button-size="26" class="tol-stepper" />
+            </div>
+            <div class="param-item">
+              <span class="param-label">线下</span>
+              <van-stepper v-model="maTolDownPct" :min="1" :max="50" :step="1" integer
+                button-size="26" class="tol-stepper" />
+            </div>
+            <span class="filter-hint">均线上{{ maTolUpPct }}%/下{{ maTolDownPct }}%内，且前20日/周曾站上均线</span>
           </div>
           <div class="filter-row">
             <span class="filter-label">勾选阈值</span>
@@ -172,10 +180,10 @@
               {{ scanResult.dataSource === 'spot' ? '全市场快照' : '名称库(无价格)' }}
             </van-tag>
             <van-tag v-if="scanResult.maFilter && scanResult.maFilter.length" plain type="primary">
-              回踩{{ scanResult.maFilter.join('/') }}日线 ±{{ Math.round(scanResult.maTol * 100) }}%
+              回踩{{ scanResult.maFilter.join('/') }}日线 +{{ Math.round((scanResult.maTol || 0) * 100) }}%/-{{ Math.round((scanResult.maTolDown ?? scanResult.maTol ?? 0) * 100) }}%
             </van-tag>
             <van-tag v-if="scanResult.maWeekFilter && scanResult.maWeekFilter.length" plain type="warning">
-              回踩{{ scanResult.maWeekFilter.join('/') }}周线 ±{{ Math.round(scanResult.maTol * 100) }}%
+              回踩{{ scanResult.maWeekFilter.join('/') }}周线 +{{ Math.round((scanResult.maTol || 0) * 100) }}%/-{{ Math.round((scanResult.maTolDown ?? scanResult.maTol ?? 0) * 100) }}%
             </van-tag>
             <van-tag v-if="scanResult.maTradeDate" plain type="default">
               日均线 {{ scanResult.maTradeDate }}
@@ -419,9 +427,12 @@ const maxPrice = ref('')
 const selectedMa = ref([])
 const selectedMaWeek = ref([])
 const maTol = ref(0.03)
-// 容差百分比（整数 1-30），与 maTol 双向同步
-const maTolPct = ref(3)
-watch(maTolPct, (v) => { maTol.value = (v || 3) / 100 })
+const maTolDown = ref(0.03)
+// 容差百分比（整数 1-50），上/下分开设定
+const maTolUpPct = ref(3)
+const maTolDownPct = ref(3)
+watch(maTolUpPct, (v) => { maTol.value = (v || 3) / 100 })
+watch(maTolDownPct, (v) => { maTolDown.value = (v || 3) / 100 })
 // 错误页一键更新入口：maSyncPeriod='day'|'week'|null，spotNeeded=快照缺失
 const maSyncPeriod = ref(null)
 const spotNeeded = ref(false)
@@ -499,7 +510,10 @@ function buildScanParams() {
   if (maxPrice.value !== '') params.max_price = maxPrice.value
   if (selectedMa.value.length) params.ma = selectedMa.value.join(',')
   if (selectedMaWeek.value.length) params.maw = selectedMaWeek.value.join(',')
-  if (selectedMa.value.length || selectedMaWeek.value.length) params.ma_tol = maTol.value
+  if (selectedMa.value.length || selectedMaWeek.value.length) {
+    params.ma_tol = maTol.value
+    params.ma_tol_down = maTolDown.value
+  }
   return params
 }
 
@@ -889,6 +903,8 @@ onUnmounted(() => stopSyncPolling())
 .filter-row + .filter-row { border-top: 1px solid rgba(255,255,255,0.06); }
 .filter-label { font-size: 13px; color: var(--text-secondary); width: 56px; flex-shrink: 0; }
 .filter-hint { font-size: 11px; color: var(--text-secondary); }
+.param-item { display: flex; align-items: center; gap: 4px; }
+.param-label { font-size: 12px; color: var(--text-secondary); }
 
 .chip-group { display: flex; gap: 8px; flex-wrap: wrap; }
 .filter-chip {

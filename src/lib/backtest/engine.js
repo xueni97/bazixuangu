@@ -60,6 +60,8 @@ function filterUniverse(spotRows, model) {
 function historicalScan(model, candidates, klineMap, imgCache, periodData, dt) {
   const dateStr = fmtDate(dt)
   const { ma, maw, maTol, weekPositions, ma144AbovePrice, ma144AboveMa288 } = model.params
+  // 下容差（股价在均线下方）与上容差分开，旧模型缺省=上容差（对称）
+  const maTolDown = model.params.maTolDown != null ? model.params.maTolDown : (maTol || 0.03)
   const hasWeekFilter = (weekPositions && weekPositions.length) || ma144AbovePrice || ma144AboveMa288
   const results = []
   for (const c of candidates) {
@@ -76,7 +78,7 @@ function historicalScan(model, candidates, klineMap, imgCache, periodData, dt) {
       for (const w of ma) {
         const maVal = w === 288 ? maSnap.ma288 : maSnap.ma144
         if (!maVal) { pass = false; break }
-        const [hit] = nearMa(maSnap.close, maVal, maSnap.high20, maTol || 0.03)
+        const [hit] = nearMa(maSnap.close, maVal, maSnap.high20, maTol || 0.03, maTolDown)
         if (!hit) { pass = false; break }
       }
       if (!pass) continue
@@ -91,7 +93,7 @@ function historicalScan(model, candidates, klineMap, imgCache, periodData, dt) {
       for (const w of maw) {
         const maVal = w === 288 ? weekSnap.ma288 : weekSnap.ma144
         if (!maVal) { pass = false; break }
-        const [hit] = nearMa(weekSnap.close, maVal, weekSnap.high20, maTol || 0.03)
+        const [hit] = nearMa(weekSnap.close, maVal, weekSnap.high20, maTol || 0.03, maTolDown)
         if (!hit) { pass = false; break }
       }
       if (!pass) continue

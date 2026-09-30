@@ -73,7 +73,10 @@
           >MA{{ ma }}</span>
         </div>
         <span class="filter-label">容差</span>
+        <span class="param-label">线上</span>
         <input v-model.number="model.params.maTol" type="number" step="0.01" class="num-input small" />
+        <span class="param-label">线下</span>
+        <input v-model.number="model.params.maTolDown" type="number" step="0.01" class="num-input small" />
       </div>
 
       <!-- 参数 steppers -->
@@ -202,6 +205,12 @@
         <span class="sm-name">{{ m.name }}</span>
         <span class="sm-params">
           {{ m.params.periods.join('/') }} · ≥{{ m.threshold }} · top{{ m.topN }} · {{ m.holdDays }}天 · {{ exitLabel(m.exitStrategy) }}
+        </span>
+        <span v-if="m.lastStats" class="sm-stats"
+          :class="(m.lastStats.annualizedReturn || 0) >= 0 ? 'up' : 'down'">
+          年化{{ m.lastStats.annualizedReturn > 0 ? '+' : '' }}{{ m.lastStats.annualizedReturn }}%
+          · 总{{ m.lastStats.totalReturn > 0 ? '+' : '' }}{{ m.lastStats.totalReturn }}%
+          · 胜{{ m.lastStats.winRate ?? '—' }}% · {{ m.lastStats.runAt }}
         </span>
         <van-icon name="delete-o" class="sm-del" @click.stop="delModel(m.id)" />
       </div>
@@ -355,6 +364,7 @@ const model = reactive({
     maxPrice: null,
     ma: [288],
     maTol: 0.03,
+    maTolDown: 0.03, // 下容差（股价在均线下方）与上容差分开
   },
   threshold: 70,
   topN: 10,
@@ -436,6 +446,18 @@ function saveModel() {
   if (!model.name) { showToast('请输入模型名称'); return }
   const m = JSON.parse(JSON.stringify(model))
   m.id = m.id || `bt_${Date.now()}`
+  // 保存最近一次回测战绩（年化等），历史模型可对比
+  if (result.value && result.value.stats) {
+    m.lastStats = {
+      totalReturn: result.value.stats.totalReturn,
+      annualizedReturn: result.value.stats.annualizedReturn,
+      winRate: result.value.stats.winRate,
+      maxDrawdown: result.value.stats.maxDrawdown,
+      tradeCount: result.value.stats.tradeCount,
+      startDate: model.startDate,
+      runAt: new Date().toLocaleString('zh-CN', { hour12: false }),
+    }
+  }
   const idx = savedModels.value.findIndex((x) => x.id === m.id)
   if (idx >= 0) savedModels.value[idx] = m
   else savedModels.value.push(m)
@@ -445,6 +467,10 @@ function saveModel() {
 
 function loadModel(m) {
   Object.assign(model, JSON.parse(JSON.stringify(m)))
+  // 旧模型兼容：params 缺 maTolDown 时用 maTol（对称）
+  if (model.params && model.params.maTolDown == null) {
+    model.params.maTolDown = model.params.maTol ?? 0.03
+  }
 }
 
 function delModel(id) {
@@ -563,12 +589,19 @@ onMounted(() => {
 .btn-row { display: flex; gap: 10px; margin-top: 10px; }
 
 .saved-model {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
   padding: 6px 0; font-size: 12px;
   border-bottom: 1px dashed rgba(255,255,255,0.06);
 }
 .sm-name { font-weight: bold; min-width: 80px; }
 .sm-params { flex: 1; color: var(--text-secondary); }
+.sm-stats {
+  flex-basis: 100%;
+  font-size: 11px;
+  margin-top: 2px;
+}
+.sm-stats.up { color: #e53935; }
+.sm-stats.down { color: #43a047; }
 .sm-del { color: #f44336; }
 
 .prog-text { margin-left: 8px; font-size: 13px; color: var(--text-secondary); }
